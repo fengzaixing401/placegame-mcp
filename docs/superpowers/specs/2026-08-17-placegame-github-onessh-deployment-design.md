@@ -105,9 +105,13 @@ Recommended branch controls are:
 Workflow permissions default to read-only. A publication job receives only:
 
 - `contents: read`;
-- `packages: write`;
-- `id-token: write` for provenance; and
-- `attestations: write` when GitHub artifact attestations are used.
+- `packages: write`.
+
+BuildKit publishes the SPDX SBOM and `mode=max` provenance as OCI attestations
+in private GHCR. The workflow does not request `id-token: write` or
+`attestations: write`; GitHub's separate artifact-attestation service is not a
+dependency because private personal repositories may require GitHub Enterprise
+Cloud for that service.
 
 All reusable third-party and GitHub actions are pinned to immutable full commit
 SHAs. Dependency update tooling may propose SHA updates through pull requests.
@@ -181,7 +185,8 @@ The Compose project name is fixed to `placegame-mcp`. It contains:
 - `migrate`: a one-shot service using the same image and configuration;
 - `postgres`: `postgres:16-alpine`, reachable only on the private Compose
   network; and
-- named volumes for PostgreSQL data and application-owned durable artifacts.
+- one named volume for dedicated PostgreSQL data; application durable state is
+  stored in that database.
 
 Only `app` publishes a host port, exactly `127.0.0.1:18080` to its internal
 HTTP port. PostgreSQL has no `ports` entry. The stack does not include Caddy on
@@ -337,11 +342,11 @@ proven:
 
 The implementation plans must be amended before application code begins:
 
-- Core Task 8 builds a production image and an app/PostgreSQL Compose model for
-  the Singapore profile instead of binding a project Caddy service to 80/443.
-- WebUI Task 8 validates loopback publication and documents the later 1Panel
-  streaming reverse-proxy requirements instead of editing the live 1Panel
-  installation.
+- Core Task 8 completes observability and health contracts consumed by the
+  deployment plan; it does not own image or Compose construction.
+- WebUI Task 8 serves built assets and validates application security and E2E
+  behavior. Loopback publication and later 1Panel streaming requirements belong
+  to the deployment plan.
 - A deployment implementation plan adds the GitHub workflows, server Compose
   assets, fixed deployment script, tests, GitHub repository creation, GHCR
   publication, and OneSSH acceptance sequence.

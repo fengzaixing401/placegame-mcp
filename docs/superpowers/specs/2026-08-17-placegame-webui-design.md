@@ -1,10 +1,13 @@
-# PlaceGame WebUI and Public Deployment Design
+# PlaceGame WebUI and Edge Security Design
 
 **Date:** 2026-08-17
 
 **Status:** Approved design
 
-**Parent specification:** `2026-08-17-placegame-mcp-core-design.md`
+**Parent specifications:**
+
+- `2026-08-17-placegame-mcp-core-design.md`
+- `2026-08-17-placegame-github-onessh-deployment-design.md`
 
 ## 1. Goal
 
@@ -16,8 +19,8 @@ Provide one administrator with a secure HTTPS WebUI for adding and operating mul
 - A typed JSON admin API served by the Python application.
 - Server-Sent Events for job progress, alerts, and account-status refreshes.
 - Static frontend assets built into the application image.
-- Caddy provides public TLS, HTTP-to-HTTPS redirect, compression, and security headers.
-- The application and PostgreSQL are not directly exposed to the public internet.
+- The Singapore application binds to `127.0.0.1:18080`; the existing 1Panel OpenResty service provides the later public TLS edge.
+- PostgreSQL is never directly exposed, and the application is not public until the operator configures a domain in 1Panel.
 
 The interface is responsive for desktop and mobile browsers. Browser use is limited to operating this management UI; game automation remains direct HTTP only.
 
@@ -156,7 +159,7 @@ The save screen presents a before/after diff. Server validation rejects impossib
 
 ## 8. Public HTTPS Security
 
-Caddy and the application enforce:
+The external HTTPS edge and the application enforce:
 
 - TLS 1.2 or newer and automatic certificate renewal.
 - Strict Transport Security after initial domain validation.
@@ -165,6 +168,8 @@ Caddy and the application enforce:
 - Request-body limits for all public endpoints.
 - Separate rate limits for login, MCP, reads, and mutations.
 - No direct PostgreSQL port exposure.
+
+For the Singapore target, 1Panel OpenResty owns ports 80 and 443. The first deployment remains loopback-only with no domain. A later operator-managed virtual host must preserve MCP and SSE streaming, set trusted forwarding headers, and apply the controls above without exposing internal health or database endpoints.
 
 MCP uses bearer authentication on `/mcp`. WebUI session cookies are not accepted as MCP authentication, and MCP tokens are not accepted for administrator pages.
 
@@ -225,4 +230,4 @@ WebUI tests may automate this management interface. They never drive or inspect 
 - WebUI, MCP, and scheduler actions produce the same policy decisions for identical state.
 - Manual high-value inventory actions cannot execute without an unexpired confirmed plan.
 - Account, job, and alert views remain usable on desktop and mobile.
-- The public deployment passes the documented TLS, cookie, CSRF, CSP, rate-limit, and secret-redaction checks.
+- Once the operator configures a domain, the public edge passes the documented TLS, cookie, CSRF, CSP, rate-limit, streaming, and secret-redaction checks.

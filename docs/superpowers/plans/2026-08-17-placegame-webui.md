@@ -1,12 +1,12 @@
-# PlaceGame WebUI and Public Deployment Implementation Plan
+# PlaceGame WebUI and Edge Security Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver a secure, responsive administrator WebUI and public HTTPS edge for managing multiple PlaceGame accounts, policies, jobs, inventory plans, and scoped MCP tokens through the same policy engine used by the scheduler and MCP.
+**Goal:** Deliver a secure, responsive administrator WebUI for managing multiple PlaceGame accounts, policies, jobs, inventory plans, and scoped MCP tokens through the same policy engine used by the scheduler and MCP.
 
-**Architecture:** FastAPI serves versioned same-origin admin routes and a session-authenticated SSE stream; React/TypeScript builds static assets into the application image. Server-side sessions, Argon2id, mandatory TOTP, CSRF, idempotency, and re-authentication protect every state-changing route. Caddy terminates TLS and exposes only the app's HTTP/MCP surface; the browser never contacts PlaceGame directly.
+**Architecture:** FastAPI serves versioned same-origin admin routes and a session-authenticated SSE stream; React/TypeScript builds static assets for the final application image. Server-side sessions, Argon2id, mandatory TOTP, CSRF, idempotency, and re-authentication protect every state-changing route. The deployment plan integrates the built assets with the loopback-only production image and existing 1Panel OpenResty edge; the browser never contacts PlaceGame directly.
 
-**Tech Stack:** Python 3.12, FastAPI/Pydantic 2/SQLAlchemy async from the core plan, argon2-cffi, pyotp, qrcode, React 18, TypeScript, Vite, TanStack Query, React Router, Vitest, Testing Library, Playwright for management-UI tests only, PostgreSQL 16, Docker Compose, and Caddy.
+**Tech Stack:** Python 3.12, FastAPI/Pydantic 2/SQLAlchemy async from the core plan, argon2-cffi, pyotp, qrcode, React 18, TypeScript, Vite, TanStack Query, React Router, Vitest, Testing Library, Playwright for management-UI tests only, and PostgreSQL 16.
 
 ## Global Constraints
 
@@ -25,15 +25,15 @@
 - Every mutation page keeps the account label/character visible; batch actions show the exact selected count and labels.
 - The policy editor uses typed controls, shows a before/after diff, rejects unknown fields and an automatic equipment quality ceiling above blue, and displays schedules in Beijing time with `UTC+8`.
 - Server-Sent Events (SSE) are sanitized, carry monotonically increasing IDs, support `Last-Event-ID` resume, and fall back to 30-second polling; sensitive mutation details require an authenticated detail request.
-- Caddy enforces TLS 1.2+, redirect, HSTS after domain validation, CSP, `nosniff`, restrictive referrer policy, frame denial, request limits, and separate rate limits for login, MCP, reads, and mutations.
-- PostgreSQL and the application are not directly public; WebUI cookies are not accepted as MCP credentials, and MCP bearer tokens are not accepted for administrator pages.
+- The application enforces CSP, `nosniff`, restrictive referrer policy, frame denial, request limits, and separate rate limits for login, MCP, reads, and mutations; the later operator-managed 1Panel edge adds TLS 1.2+, redirects, and HSTS after domain validation.
+- PostgreSQL is never public and the Singapore application remains bound to `127.0.0.1:18080` until the operator configures 1Panel; WebUI cookies are not accepted as MCP credentials, and MCP bearer tokens are not accepted for administrator pages.
 - Management UI tests may use Playwright only against the isolated admin app and fake game server; no test or production browser path drives or inspects the PlaceGame website.
 
 ---
 
 ## Execution Order
 
-Execute this plan only after the Core and Inventory plans and their acceptance suites pass. It consumes their frozen service contracts and completes the production surface without changing game-operation semantics. The complete order is Core → Inventory → WebUI.
+Execute this plan only after the Core and Inventory plans and their acceptance suites pass. It consumes their frozen service contracts and completes the application surface without changing game-operation semantics. The complete order is deployment repository bootstrap → Core → Inventory → WebUI → remaining deployment tasks.
 
 ## File Map
 
@@ -53,7 +53,7 @@ Execute this plan only after the Core and Inventory plans and their acceptance s
 - Create: `web/src/components/AccountCard.tsx`, `web/src/components/StatusBadge.tsx`, `web/src/components/PlanPreview.tsx`, `web/src/components/ConfirmDialog.tsx`, `web/src/components/ProtectionBadge.tsx`, `web/src/components/EventStream.tsx` — reusable accessible controls.
 - Create: `web/src/pages/DashboardPage.tsx`, `web/src/pages/AccountPage.tsx`, `web/src/pages/AccountsPage.tsx`, `web/src/pages/JobsPage.tsx`, `web/src/pages/AuditPage.tsx`, `web/src/pages/McpTokensPage.tsx`, `web/src/pages/SettingsPage.tsx` — information architecture pages.
 - Create: `web/src/styles.css` — responsive layout, text/icon state cues, focus styles, and contrast tokens.
-- Modify: `Dockerfile`, `docker-compose.yml`, `Caddyfile`, `.env.example` — multi-stage frontend build, static serving, TLS/security headers, and public route boundary.
+- Modify: `.env.example`, `src/placegame/app.py` — static serving and application security-header defaults; production image, Compose, and external edge integration belong to the deployment plan.
 - Create: `tests/admin/conftest.py`, `tests/admin/fake_clock.py` — session, TOTP, and API fixtures.
 - Create: `tests/admin/test_auth.py`, `tests/admin/test_sessions.py`, `tests/admin/test_api_contract.py`, `tests/admin/test_events.py`, `tests/admin/test_security.py` — backend security and route tests.
 - Create: `web/src/auth/AuthProvider.test.tsx`, `web/src/pages/AccountsPage.test.tsx`, `web/src/pages/SettingsPage.test.tsx`, `web/src/components/AccountCard.test.tsx`, `web/src/components/PlanPreview.test.tsx`, `web/src/components/EventStream.test.tsx` — component/accessibility tests.
@@ -749,12 +749,9 @@ git add src/placegame/admin/auth.py src/placegame/admin/sessions.py src/placegam
 git commit -m "feat: add live admin events and typed policy editor"
 ```
 
-### Task 8: Harden Public HTTPS, Build the Image, and Run End-to-End Acceptance
+### Task 8: Serve Built Assets and Run End-to-End Acceptance
 
 **Files:**
-- Modify: `Dockerfile`
-- Modify: `docker-compose.yml`
-- Modify: `Caddyfile`
 - Modify: `.env.example`
 - Modify: `src/placegame/app.py`
 - Create: `web/e2e/admin-flow.spec.ts`
@@ -762,16 +759,17 @@ git commit -m "feat: add live admin events and typed policy editor"
 - Create: `tests/admin/test_acceptance.py`
 
 **Interfaces:**
-- Produces a deployable image with built assets, Caddy edge-security policy, application rate-limit enforcement, SPA fallback, and a passing management-flow/security acceptance suite.
+- Produces built frontend assets, application security headers, SPA fallback, and a passing management-flow/security acceptance suite consumed by the deployment plan.
 
-- [ ] **Step 1: Write failing deployment and end-to-end checks**
+- [ ] **Step 1: Write failing application-boundary and end-to-end checks**
 
 ```python
-def test_public_boundary_and_security_headers(compose_config, caddy_response):
-    assert "postgres" not in compose_config.services_with_public_ports()
-    assert "max-age=31536000" in caddy_response.headers["strict-transport-security"]
-    assert "default-src 'self'" in caddy_response.headers["content-security-policy"]
-    assert caddy_response.headers["x-frame-options"] == "DENY"
+def test_application_security_headers(admin_client):
+    response = admin_client.get("/")
+    assert "default-src 'self'" in response.headers["content-security-policy"]
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["x-frame-options"] == "DENY"
 
 async def test_full_admin_api_flow(admin_api, fake_game):
     await admin_api.complete_setup_and_login()
@@ -798,76 +796,38 @@ test("administrator can add an account, execute a previewed cleanup, and revoke 
 });
 ```
 
-- [ ] **Step 2: Run checks and verify they fail before deployment wiring**
+- [ ] **Step 2: Run checks and verify they fail before static serving is wired**
 
 Run: `uv run pytest tests/admin/test_acceptance.py -q; npm --prefix web run test:e2e`
 
-Expected: FAIL until the production image, Caddy routes, and SPA fallback are configured.
+Expected: FAIL until built assets, security headers, and SPA fallback are configured.
 
-- [ ] **Step 3: Implement multi-stage image and Caddy policy**
+- [ ] **Step 3: Implement static serving and application security policy**
 
-The first Docker stage runs `npm ci` and `npm run build`; the final Python stage copies only `web/dist`, installs the locked Python dependencies, runs as a non-root user, mounts the master key read-only, and contains no browser binaries. Compose keeps only Caddy's 80/443 published, waits for PostgreSQL health, and persists database/Caddy state. Caddy redirects HTTP, enables automatic certificate renewal with TLS 1.2+, compression, HSTS after domain configuration, `Content-Security-Policy: default-src 'self'; connect-src 'self'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, and request-body limits. The Task 3 application middleware enforces distinct login/MCP/read/mutation rate buckets without a non-standard Caddy plugin. `/mcp` keeps bearer auth and explicitly ignores the session cookie; admin dependencies reject MCP bearer tokens. Unknown SPA paths serve `index.html`; API errors remain JSON.
-
-```dockerfile
-FROM node:22-alpine AS web-build
-WORKDIR /build/web
-COPY web/package.json web/package-lock.json ./
-RUN npm ci
-COPY web/ ./
-RUN npm run build
-
-FROM ghcr.io/astral-sh/uv:0.8.13 AS uv-bin
-FROM python:3.12-slim AS runtime
-RUN useradd --create-home --uid 10001 placegame
-WORKDIR /app
-COPY --from=uv-bin /uv /uvx /bin/
-COPY pyproject.toml uv.lock ./
-COPY src ./src
-COPY migrations alembic.ini ./
-RUN uv sync --frozen --no-dev --no-install-project && chown -R placegame:placegame /app
-COPY --from=web-build /build/web/dist ./web/dist
-ENV PATH="/app/.venv/bin:$PATH" PYTHONPATH="/app/src"
-USER 10001
-CMD ["python", "-m", "placegame.app"]
-```
-
-```caddyfile
-{$PLACEGAME_DOMAIN} {
-    encode zstd gzip
-    request_body { max_size 1MB }
-    header {
-        Strict-Transport-Security "{$PLACEGAME_HSTS:max-age=0}"
-        Content-Security-Policy "default-src 'self'; connect-src 'self'; frame-ancestors 'none'"
-        X-Content-Type-Options "nosniff"
-        Referrer-Policy "no-referrer"
-        X-Frame-Options "DENY"
-    }
-    reverse_proxy app:8000
-}
-```
+`npm run build` emits `web/dist`; `create_app` mounts the hashed assets and returns `index.html` only for unknown non-API, non-MCP GET paths. API errors remain JSON and unknown `/api` or `/mcp` paths never fall through to the SPA. Application middleware sets `Content-Security-Policy: default-src 'self'; connect-src 'self'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `X-Frame-Options: DENY`. The Task 3 middleware retains separate login/MCP/read/mutation rate buckets. `/mcp` keeps bearer authentication and explicitly ignores the session cookie; admin dependencies reject MCP bearer tokens. TLS, redirect, HSTS, compression, loopback publication, and the production image belong to the deployment plan and later operator-managed 1Panel configuration.
 
 Register startup/shutdown hooks for DB, scheduler, and event bus, and expose `/api/admin/v1/auth/status` before setup. The acceptance fixture starts the fake game server and app with ten isolated accounts, runs idle/boss/inventory plans, verifies job history, proves WebUI/MCP/scheduler produce the same decision for an identical snapshot and policy, checks partial batch results and one-account token isolation, and verifies no secret appears in HTML, JSON, SSE, logs, or audit responses. Playwright also asserts no horizontal overflow or overlapping primary controls at both configured viewports.
 
 `tests/admin/e2e_server.py` refuses non-loopback binding, starts an ephemeral PostgreSQL testcontainer, injects the in-process fake game transport, serves the built `web/dist` and API on `127.0.0.1:4173`, and stops only that testcontainer on shutdown. It never reads production environment credentials.
 
-Set `.env.example` to `PLACEGAME_HSTS=max-age=0` for first certificate issuance. After `curl --fail "https://${PLACEGAME_DOMAIN}/health/ready"` succeeds through Caddy, deployment instructions require changing it to `max-age=31536000; includeSubDomains` and recreating only Caddy; the acceptance profile uses that post-validation value.
+Set `.env.example` to `PLACEGAME_PUBLIC_BASE_URL=` so the initial deployment has no implied domain. The application does not emit HSTS on plain loopback HTTP; the later 1Panel virtual host owns HSTS after certificate and domain validation.
 
 - [ ] **Step 4: Run the complete verification suite**
 
-Run: `uv run pytest -q && npm --prefix web ci && npm --prefix web run typecheck && npm --prefix web test -- --run && npm --prefix web run build && npm --prefix web exec -- playwright install chromium && npm --prefix web run test:e2e && docker compose config`
+Run: `uv run pytest -q && npm --prefix web ci && npm --prefix web run typecheck && npm --prefix web test -- --run && npm --prefix web run build && npm --prefix web exec -- playwright install chromium && npm --prefix web run test:e2e`
 
-Expected: backend, frontend, accessibility, E2E, and security tests pass; Compose validates and reports no public PostgreSQL port.
+Expected: backend, frontend, accessibility, E2E, and application-security tests pass with no secret output.
 
-- [ ] **Step 5: Commit the WebUI/deployment release**
+- [ ] **Step 5: Commit the WebUI acceptance release**
 
 ```bash
-git add Dockerfile docker-compose.yml Caddyfile .env.example src/placegame/app.py web/e2e tests/admin/e2e_server.py tests/admin/test_acceptance.py
-git commit -m "feat: secure public webui deployment"
+git add .env.example src/placegame/app.py web/e2e tests/admin/e2e_server.py tests/admin/test_acceptance.py
+git commit -m "feat: complete webui acceptance surface"
 ```
 
 ## WebUI Self-Review Checklist
 
-- Spec coverage: Tasks 1–3 cover typed API envelopes, one-time setup, Argon2id/TOTP/recovery, lockout, server sessions, cookie flags, CSRF, re-auth, idempotency, and scope separation; Task 4 covers both account credential modes, removal/tombstones, and one-time MCP token reveal/revocation; Task 5 covers every dashboard/detail tab, plan/confirmation flow, policy validation/diff, jobs/audit/settings, and partial batch results; Tasks 6–7 cover responsive/accessibility rules, protection badges, optimizer explanations, SSE resume/poll fallback, alerts, and failure UX; Task 8 covers TLS/Caddy/container boundaries and the acceptance criteria.
+- Spec coverage: Tasks 1–3 cover typed API envelopes, one-time setup, Argon2id/TOTP/recovery, lockout, server sessions, cookie flags, CSRF, re-auth, idempotency, and scope separation; Task 4 covers both account credential modes, removal/tombstones, and one-time MCP token reveal/revocation; Task 5 covers every dashboard/detail tab, plan/confirmation flow, policy validation/diff, jobs/audit/settings, and partial batch results; Tasks 6–7 cover responsive/accessibility rules, protection badges, optimizer explanations, SSE resume/poll fallback, alerts, and failure UX; Task 8 covers static serving, application security headers, and acceptance criteria. Production image and edge boundaries are covered by the deployment plan.
 - Placeholder scan command: `rg -n -i "T[O]DO|T[B]D|F[I]XME|implement[ ]later|fill[ ]in|write[ ]tests[ ]for[ ]the[ ]above|appropriate[ ]error[ ]handling|similar[ ]to[ ]task" docs/superpowers/plans/2026-08-17-placegame-webui.md`; expected output is empty.
 - Type/signature check: `uv run pyright src/placegame/admin tests/admin` and `npm --prefix web run typecheck` must report zero errors; route paths, envelopes, session dependencies, and inventory/core service calls must match the cross-plan contracts above.
-- Fresh verification: `uv run pytest -q`, `npm --prefix web ci`, `npm --prefix web test -- --run`, `npm --prefix web run build`, `npm --prefix web exec -- playwright install chromium`, `npm --prefix web run test:e2e`, and `docker compose config` must succeed before offering execution.
+- Fresh verification: `uv run pytest -q`, `npm --prefix web ci`, `npm --prefix web test -- --run`, `npm --prefix web run build`, `npm --prefix web exec -- playwright install chromium`, and `npm --prefix web run test:e2e` must succeed before moving to deployment tasks.

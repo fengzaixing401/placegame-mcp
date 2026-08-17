@@ -8,6 +8,7 @@
 
 - `2026-08-17-placegame-inventory-design.md`
 - `2026-08-17-placegame-webui-design.md`
+- `2026-08-17-placegame-github-onessh-deployment-design.md`
 
 ## 1. Goal
 
@@ -36,12 +37,12 @@ The first release explicitly excludes:
 
 ## 3. Architectural Decision
 
-Use a modular monolith for application logic, deployed with PostgreSQL and Caddy through Docker Compose.
+Use a modular monolith for application logic, deployed with a dedicated PostgreSQL service through Docker Compose and a target-specific HTTPS edge. The Singapore target uses the existing 1Panel OpenResty installation defined by the deployment overlay.
 
 ```text
 Remote Agent ── MCP/HTTPS ─┐
-                           ├── Caddy ── Application
-Administrator ─ Web/HTTPS ┘               │
+                           ├── HTTPS edge ── Application
+Administrator ─ Web/HTTPS ┘                    │
                                            ├── MCP adapter
                                            ├── Admin API + WebUI
                                            ├── policy engine
@@ -59,13 +60,14 @@ This keeps all callers on one policy path. PostgreSQL provides durable coordinat
 
 ## 4. Deployment Topology
 
-Docker Compose contains:
+The PlaceGame Docker Compose project contains:
 
 - `app`: Python 3.12 asynchronous application, MCP endpoint, admin API, scheduler, and built WebUI assets.
 - `postgres`: PostgreSQL 16 with a persistent volume and health checks.
-- `caddy`: TLS termination, HTTPS redirects, request limits, and security headers.
 
-The application is deployed as one active scheduler instance. HTTP request handling may use multiple async tasks, but only the elected scheduler lease holder dispatches timed jobs. Backups include the PostgreSQL database, Caddy state, and the encrypted-secret master key. The master key is stored separately from database backups.
+On the Singapore target, `app` binds only to `127.0.0.1:18080`, PostgreSQL publishes no host port, and the existing 1Panel OpenResty service remains the public TLS edge. Domain and OpenResty virtual-host changes are operator-managed and are not part of the first deployment.
+
+The application is deployed as one active scheduler instance. HTTP request handling may use multiple async tasks, but only the elected scheduler lease holder dispatches timed jobs. PlaceGame backups include the PostgreSQL database and the encrypted-secret master key; the key is stored separately from database backups. Existing 1Panel configuration remains under the server operator's backup policy.
 
 ## 5. Core Module Boundaries
 
