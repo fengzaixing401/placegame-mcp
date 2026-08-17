@@ -2,8 +2,11 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import BYTEA, JSONB, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from placegame.contracts import EncryptedSecretFrame
+from placegame.security.redaction import RedactedJSON
 
 
 def utcnow() -> datetime:
@@ -20,10 +23,10 @@ class GameAccount(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     label: Mapped[str] = mapped_column(String(120), nullable=False)
-    game_username: Mapped[bytes | None] = mapped_column(BYTEA, nullable=True)
+    game_username: Mapped[bytes | None] = mapped_column(EncryptedSecretFrame(), nullable=True)
     auth_mode: Mapped[str] = mapped_column(String(32), nullable=False)
-    password: Mapped[bytes | None] = mapped_column(BYTEA, nullable=True)
-    session_token: Mapped[bytes | None] = mapped_column(BYTEA, nullable=True)
+    password: Mapped[bytes | None] = mapped_column(EncryptedSecretFrame(), nullable=True)
+    session_token: Mapped[bytes | None] = mapped_column(EncryptedSecretFrame(), nullable=True)
     session_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     paused_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -38,6 +41,9 @@ class GameAccount(Base):
 
 class AccountPolicy(Base):
     __tablename__ = "account_policies"
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(policy) = 'object'", name="ck_account_policies_policy_object"),
+    )
 
     account_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("game_accounts.id", ondelete="CASCADE"), primary_key=True)
     policy: Mapped[dict] = mapped_column(JSONB, nullable=False)
@@ -48,6 +54,12 @@ class AccountPolicy(Base):
 
 class AccountSnapshot(Base):
     __tablename__ = "account_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "expires_at = fetched_at + INTERVAL '5 minutes'",
+            name="ck_account_snapshots_snapshot_expiry",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     account_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("game_accounts.id", ondelete="CASCADE"), nullable=False)
@@ -136,13 +148,16 @@ class AuditEvent(Base):
     costs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    before: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    after: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    before: Mapped[dict | None] = mapped_column(RedactedJSON(), nullable=True)
+    after: Mapped[dict | None] = mapped_column(RedactedJSON(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
 class SchedulerLease(Base):
     __tablename__ = "scheduler_leases"
+    __table_args__ = (
+        CheckConstraint("name = 'default'", name="ck_scheduler_leases_default_name"),
+    )
 
     name: Mapped[str] = mapped_column(String(64), primary_key=True, default="default")
     owner: Mapped[str | None] = mapped_column(String(128), nullable=True)

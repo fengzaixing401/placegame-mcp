@@ -1,6 +1,8 @@
 from collections.abc import Mapping
 from typing import Any
 
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.types import TypeDecorator
 
 _SENSITIVE_KEY_PARTS = (
     "password",
@@ -32,3 +34,13 @@ def redact(value: Any) -> Any:
 
 def _is_sensitive_key(key: object) -> bool:
     return isinstance(key, str) and any(part in key.lower() for part in _SENSITIVE_KEY_PARTS)
+
+
+class RedactedJSON(TypeDecorator[Any]):
+    """Redact structured audit payloads before they cross the ORM boundary."""
+
+    impl = JSONB
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect) -> Any:
+        return redact(value)

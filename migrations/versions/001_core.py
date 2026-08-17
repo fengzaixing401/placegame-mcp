@@ -41,6 +41,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["account_id"], ["game_accounts.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("account_id"),
+        sa.CheckConstraint("jsonb_typeof(policy) = 'object'", name="ck_account_policies_policy_object"),
     )
     op.create_index("ix_account_policies_policy_version", "account_policies", ["policy_version"])
     op.create_table(
@@ -52,6 +53,10 @@ def upgrade() -> None:
         sa.Column("fetched_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["account_id"], ["game_accounts.id"], ondelete="CASCADE"),
+        sa.CheckConstraint(
+            "expires_at = fetched_at + INTERVAL '5 minutes'",
+            name="ck_account_snapshots_snapshot_expiry",
+        ),
     )
     op.create_index("ix_account_snapshots_expires_at", "account_snapshots", ["expires_at"])
     op.create_table(
@@ -146,11 +151,33 @@ def upgrade() -> None:
         sa.Column("owner", sa.String(length=128), nullable=True),
         sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint("name = 'default'", name="ck_scheduler_leases_default_name"),
+    )
+    op.execute(
+        "INSERT INTO scheduler_leases (name, updated_at) VALUES ('default', CURRENT_TIMESTAMP)"
+    )
+    op.execute(
+        """
+        CREATE FUNCTION prevent_audit_event_mutation() RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'audit_events are append-only';
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER audit_events_immutable
+        BEFORE UPDATE OR DELETE ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION prevent_audit_event_mutation()
+        """
     )
 
 
 def downgrade() -> None:
     op.drop_table("scheduler_leases")
+    op.execute("DROP TRIGGER audit_events_immutable ON audit_events")
+    op.execute("DROP FUNCTION prevent_audit_event_mutation")
     op.drop_index("ix_audit_events_retention", table_name="audit_events")
     op.drop_table("audit_events")
     op.drop_index("ix_mcp_tokens_expires_at", table_name="mcp_tokens")

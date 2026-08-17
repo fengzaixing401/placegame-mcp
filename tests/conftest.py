@@ -55,6 +55,7 @@ def alembic_config():
     def build(database_url: str) -> Config:
         config = Config("alembic.ini")
         config.set_main_option("sqlalchemy.url", database_url)
+        config.attributes["placegame_test_database_url"] = database_url
         return config
 
     return build

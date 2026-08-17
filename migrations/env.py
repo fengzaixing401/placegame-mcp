@@ -5,6 +5,7 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from placegame.config import Settings
 from placegame.models import Base
 
 
@@ -16,9 +17,16 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def database_url() -> str:
+    test_database_url = config.attributes.get("placegame_test_database_url")
+    if test_database_url is not None:
+        return test_database_url
+    return Settings.from_env().read_database_url()
+
+
 def run_migrations_offline() -> None:
     context.configure(
-        url=config.get_main_option("sqlalchemy.url"),
+        url=database_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -34,8 +42,10 @@ def do_run_migrations(connection) -> None:
 
 
 async def run_migrations_online() -> None:
+    configuration = config.get_section(config.config_ini_section, {}).copy()
+    configuration["sqlalchemy.url"] = database_url()
     connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
