@@ -5,7 +5,8 @@ from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, In
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from placegame.contracts import EncryptedSecretFrame
+from placegame.contracts import EncryptedSecretFrame, encrypted_aad
+from placegame.security.crypto import EncryptedSecret, SecretBox
 from placegame.security.redaction import RedactedJSON
 
 
@@ -23,10 +24,16 @@ class GameAccount(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     label: Mapped[str] = mapped_column(String(120), nullable=False)
-    game_username: Mapped[bytes | None] = mapped_column(EncryptedSecretFrame(), nullable=True)
+    _game_username: Mapped[EncryptedSecret | None] = mapped_column(
+        "game_username", EncryptedSecretFrame(), nullable=True
+    )
     auth_mode: Mapped[str] = mapped_column(String(32), nullable=False)
-    password: Mapped[bytes | None] = mapped_column(EncryptedSecretFrame(), nullable=True)
-    session_token: Mapped[bytes | None] = mapped_column(EncryptedSecretFrame(), nullable=True)
+    _password: Mapped[EncryptedSecret | None] = mapped_column(
+        "password", EncryptedSecretFrame(), nullable=True
+    )
+    _session_token: Mapped[EncryptedSecret | None] = mapped_column(
+        "session_token", EncryptedSecretFrame(), nullable=True
+    )
     session_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     paused_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -37,6 +44,46 @@ class GameAccount(Base):
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     auth_failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     auth_failure_window_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def __init__(self, **kwargs):
+        if kwargs.get("id") is None:
+            kwargs["id"] = uuid4()
+        super().__init__(**kwargs)
+
+    def set_game_username(self, value: str | None, secret_box: SecretBox) -> None:
+        self._game_username = self._seal_secret(value, secret_box, "game_username")
+
+    def get_game_username(self, secret_box: SecretBox) -> str | None:
+        return self._open_secret(self._game_username, secret_box, "game_username")
+
+    def set_password(self, value: str | None, secret_box: SecretBox) -> None:
+        self._password = self._seal_secret(value, secret_box, "password")
+
+    def get_password(self, secret_box: SecretBox) -> str | None:
+        return self._open_secret(self._password, secret_box, "password")
+
+    def set_session_token(self, value: str | None, secret_box: SecretBox) -> None:
+        self._session_token = self._seal_secret(value, secret_box, "session_token")
+
+    def get_session_token(self, secret_box: SecretBox) -> str | None:
+        return self._open_secret(self._session_token, secret_box, "session_token")
+
+    def _seal_secret(
+        self, value: str | None, secret_box: SecretBox, column: str
+    ) -> EncryptedSecret | None:
+        if value is None:
+            return None
+        return secret_box.encrypt(value, aad=self._secret_aad(column))
+
+    def _open_secret(
+        self, value: EncryptedSecret | None, secret_box: SecretBox, column: str
+    ) -> str | None:
+        if value is None:
+            return None
+        return secret_box.decrypt(value, aad=self._secret_aad(column))
+
+    def _secret_aad(self, column: str) -> str:
+        return encrypted_aad("game_accounts", self.id, column)
 
 
 class AccountPolicy(Base):
@@ -142,8 +189,8 @@ class AuditEvent(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     actor: Mapped[str] = mapped_column(String(128), nullable=False)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
-    account_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("game_accounts.id", ondelete="SET NULL"), nullable=True)
-    plan_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("action_plans.id", ondelete="SET NULL"), nullable=True)
+    account_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("game_accounts.id", ondelete="RESTRICT"), nullable=True)
+    plan_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("action_plans.id", ondelete="RESTRICT"), nullable=True)
     action: Mapped[str] = mapped_column(String(128), nullable=False)
     costs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

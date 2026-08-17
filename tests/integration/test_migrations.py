@@ -10,7 +10,8 @@ from sqlalchemy.exc import DBAPIError, StatementError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from placegame.contracts import decode_encrypted_secret, encode_encrypted_secret, encrypted_aad
-from placegame.models import AuditEvent, GameAccount
+from placegame.errors import InvalidSecret
+from placegame.models import ActionPlan, AuditEvent, GameAccount
 
 
 def test_migrations_upgrade_and_match_metadata(postgres_url, alembic_config):
@@ -65,52 +66,92 @@ async def _insert_account(engine) -> UUID:
     return account_id
 
 
-async def test_game_account_persists_only_framed_encrypted_secrets(migrated_engine, secret_box):
-    account_id = uuid4()
-    aad = encrypted_aad("game_accounts", account_id, "password")
-    framed = encode_encrypted_secret(secret_box.encrypt("password", aad=aad))
+async def test_game_account_secrets_are_record_bound_and_persist_as_binary_frames(
+    migrated_engine, secret_box
+):
+    account = GameAccount(label="encrypted", auth_mode="password")
+    account.set_game_username("username", secret_box)
+    account.set_password("password", secret_box)
+    account.set_session_token("session-token", secret_box)
     session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
 
     async with session_factory() as session:
-        session.add(
-            GameAccount(
-                id=account_id,
-                label="encrypted",
-                auth_mode="password",
-                password=framed,
-            )
-        )
+        session.add(account)
         await session.commit()
+        session.expunge_all()
+        reloaded = await session.get(GameAccount, account.id)
 
     async with migrated_engine.connect() as connection:
-        stored = await connection.scalar(
-            text("SELECT password FROM game_accounts WHERE id = :id"), {"id": account_id}
+        stored = await connection.execute(
+            text(
+                "SELECT game_username, password, session_token "
+                "FROM game_accounts WHERE id = :id"
+            ),
+            {"id": account.id},
         )
+        stored_values = stored.one()
 
-    assert stored == framed
-    assert secret_box.decrypt(decode_encrypted_secret(stored), aad=aad) == "password"
+    assert reloaded is not None
+    assert reloaded.get_game_username(secret_box) == "username"
+    assert reloaded.get_password(secret_box) == "password"
+    assert reloaded.get_session_token(secret_box) == "session-token"
+    assert all(isinstance(value, bytes) and b"password" not in value for value in stored_values)
+    assert secret_box.decrypt(
+        decode_encrypted_secret(stored_values.password),
+        aad=encrypted_aad("game_accounts", account.id, "password"),
+    ) == "password"
+
+
+async def test_game_account_rejects_raw_frames_and_detects_aad_copying(migrated_engine, secret_box):
+    source = GameAccount(label="source", auth_mode="password")
+    source.set_password("password", secret_box)
+    session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
 
     async with session_factory() as session:
+        session.add(source)
+        await session.commit()
+        source_id = source.id
+        source_password = source._password
+
+        fake_frame = b"\x01" + b"f" * 28
         session.add(
             GameAccount(
-                id=uuid4(),
-                label="plaintext",
+                label="fake-frame",
                 auth_mode="password",
-                password=b"plaintext",
+                _password=fake_frame,
             )
         )
-        with pytest.raises(StatementError, match="encrypted secret format"):
+        with pytest.raises(StatementError, match="encrypted secret"):
             await session.commit()
+        await session.rollback()
+
+        serialized = encode_encrypted_secret(
+            secret_box.encrypt("password", aad=encrypted_aad("game_accounts", source_id, "password"))
+        )
+        session.add(
+            GameAccount(label="serialized-frame", auth_mode="password", _password=serialized)
+        )
+        with pytest.raises(StatementError, match="encrypted secret"):
+            await session.commit()
+        await session.rollback()
+
+        copied = GameAccount(label="copied", auth_mode="password")
+        copied._password = source_password
+        copied._session_token = source_password
+        session.add(copied)
+        await session.commit()
+        copied_id = copied.id
+        session.expunge_all()
+        reloaded = await session.get(GameAccount, copied_id)
+
+    assert reloaded is not None
+    with pytest.raises(InvalidSecret):
+        reloaded.get_password(secret_box)
+    with pytest.raises(InvalidSecret):
+        reloaded.get_session_token(secret_box)
 
 
-@pytest.mark.parametrize(
-    "statement",
-    (
-        "UPDATE audit_events SET action = 'rewritten' WHERE id = :id",
-        "DELETE FROM audit_events WHERE id = :id",
-    ),
-)
-async def test_audit_events_are_redacted_and_immutable(migrated_engine, statement):
+async def test_audit_events_are_redacted_and_reject_updates_and_fresh_deletes(migrated_engine):
     event_id = uuid4()
     session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
 
@@ -134,9 +175,116 @@ async def test_audit_events_are_redacted_and_immutable(migrated_engine, statemen
     }
     assert stored_after == {"Authorization": "[REDACTED]"}
 
-    with pytest.raises(DBAPIError, match="audit_events are append-only"):
+    with pytest.raises(DBAPIError, match="audit_events are immutable"):
         async with migrated_engine.begin() as connection:
-            await connection.execute(text(statement), {"id": event_id})
+            await connection.execute(
+                text("UPDATE audit_events SET action = 'rewritten' WHERE id = :id"), {"id": event_id}
+            )
+    with pytest.raises(DBAPIError, match="audit_events are retained for 90 days"):
+        async with migrated_engine.begin() as connection:
+            await connection.execute(text("DELETE FROM audit_events WHERE id = :id"), {"id": event_id})
+
+
+async def test_aged_audit_events_can_be_purged(migrated_engine):
+    event_id = uuid4()
+    session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(
+            AuditEvent(
+                id=event_id,
+                actor="retention",
+                source="scheduler",
+                action="retention.purge",
+                created_at=datetime.now(timezone.utc) - timedelta(days=91),
+            )
+        )
+        await session.commit()
+
+    async with migrated_engine.begin() as connection:
+        await connection.execute(text("DELETE FROM audit_events WHERE id = :id"), {"id": event_id})
+
+
+async def test_audit_references_block_parent_deletion_until_aged_event_is_purged(migrated_engine):
+    account_id = await _insert_account(migrated_engine)
+    plan_id = uuid4()
+    fresh_event_id = uuid4()
+    aged_account_id = await _insert_account(migrated_engine)
+    aged_event_id = uuid4()
+    session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        session.add(
+            ActionPlan(
+                id=plan_id,
+                account_id=account_id,
+                state_fingerprint="state",
+                policy_version=1,
+                proposed_actions=[],
+                estimated_costs={},
+                risk="low",
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            )
+        )
+        session.add(
+            AuditEvent(
+                id=fresh_event_id,
+                actor="operator",
+                source="mcp",
+                account_id=account_id,
+                plan_id=plan_id,
+                action="plan.execute",
+            )
+        )
+        session.add(
+            AuditEvent(
+                id=aged_event_id,
+                actor="retention",
+                source="scheduler",
+                account_id=aged_account_id,
+                action="retention.purge",
+                created_at=datetime.now(timezone.utc) - timedelta(days=91),
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(DBAPIError):
+        async with migrated_engine.begin() as connection:
+            await connection.execute(text("DELETE FROM action_plans WHERE id = :id"), {"id": plan_id})
+    with pytest.raises(DBAPIError):
+        async with migrated_engine.begin() as connection:
+            await connection.execute(text("DELETE FROM game_accounts WHERE id = :id"), {"id": account_id})
+
+    async with migrated_engine.connect() as connection:
+        event = (
+            await connection.execute(
+                text("SELECT account_id, plan_id FROM audit_events WHERE id = :id"),
+                {"id": fresh_event_id},
+            )
+        ).one()
+    assert event.account_id == account_id
+    assert event.plan_id == plan_id
+
+    with pytest.raises(DBAPIError):
+        async with migrated_engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM game_accounts WHERE id = :id"), {"id": aged_account_id}
+            )
+    async with migrated_engine.begin() as connection:
+        await connection.execute(text("DELETE FROM audit_events WHERE id = :id"), {"id": aged_event_id})
+        await connection.execute(text("DELETE FROM game_accounts WHERE id = :id"), {"id": aged_account_id})
+
+
+async def test_game_account_policy_version_cannot_decrease(migrated_engine):
+    account_id = await _insert_account(migrated_engine)
+    async with migrated_engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE game_accounts SET policy_version = 2 WHERE id = :id"), {"id": account_id}
+        )
+    with pytest.raises(DBAPIError, match="policy_version cannot decrease"):
+        async with migrated_engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE game_accounts SET policy_version = 1 WHERE id = :id"), {"id": account_id}
+            )
 
 
 async def test_snapshot_expiry_is_exactly_five_minutes(migrated_engine):
@@ -204,3 +352,7 @@ def test_migrations_read_database_url_from_secret_file(postgres_url, monkeypatch
 
     command.upgrade(config, "head")
     command.check(config)
+
+
+def test_alembic_config_has_no_static_database_url():
+    assert Config("alembic.ini").get_main_option("sqlalchemy.url") is None

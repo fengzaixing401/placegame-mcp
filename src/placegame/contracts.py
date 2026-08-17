@@ -25,16 +25,20 @@ def decode_encrypted_secret(value: bytes) -> EncryptedSecret:
     return EncryptedSecret(nonce=value[1 : 1 + _NONCE_BYTES], ciphertext=value[1 + _NONCE_BYTES :])
 
 
-class EncryptedSecretFrame(TypeDecorator[bytes]):
-    """Only persist versioned AES-GCM frames in encrypted database columns."""
+class EncryptedSecretFrame(TypeDecorator[EncryptedSecret]):
+    """Persist only encapsulated encrypted values, never caller-supplied frames."""
 
     impl = BYTEA
     cache_ok = True
 
-    def process_bind_param(self, value: bytes | None, dialect) -> bytes | None:
+    def process_bind_param(self, value: EncryptedSecret | None, dialect) -> bytes | None:
         if value is None:
             return None
-        if not isinstance(value, bytes):
-            raise ValueError("encrypted secret must be bytes")
-        decode_encrypted_secret(value)
-        return value
+        if not isinstance(value, EncryptedSecret):
+            raise ValueError("encrypted secret must be an EncryptedSecret")
+        return encode_encrypted_secret(value)
+
+    def process_result_value(self, value: bytes | None, dialect) -> EncryptedSecret | None:
+        if value is None:
+            return None
+        return decode_encrypted_secret(value)

@@ -141,8 +141,8 @@ def upgrade() -> None:
         sa.Column("before", postgresql.JSONB(), nullable=True),
         sa.Column("after", postgresql.JSONB(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["account_id"], ["game_accounts.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["plan_id"], ["action_plans.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(["account_id"], ["game_accounts.id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(["plan_id"], ["action_plans.id"], ondelete="RESTRICT"),
     )
     op.create_index("ix_audit_events_retention", "audit_events", ["created_at"])
     op.create_table(
@@ -158,9 +158,28 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        CREATE FUNCTION prevent_audit_event_mutation() RETURNS trigger AS $$
+        CREATE FUNCTION prevent_game_account_policy_version_decrease() RETURNS trigger AS $$
         BEGIN
-            RAISE EXCEPTION 'audit_events are append-only';
+            IF NEW.policy_version < OLD.policy_version THEN
+                RAISE EXCEPTION 'policy_version cannot decrease';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER game_accounts_policy_version_monotonic
+        BEFORE UPDATE OF policy_version ON game_accounts
+        FOR EACH ROW EXECUTE FUNCTION prevent_game_account_policy_version_decrease()
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION prevent_audit_event_update() RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'audit_events are immutable';
         END;
         $$ LANGUAGE plpgsql
         """
@@ -168,8 +187,27 @@ def upgrade() -> None:
     op.execute(
         """
         CREATE TRIGGER audit_events_immutable
-        BEFORE UPDATE OR DELETE ON audit_events
-        FOR EACH ROW EXECUTE FUNCTION prevent_audit_event_mutation()
+        BEFORE UPDATE ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION prevent_audit_event_update()
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION enforce_audit_event_retention() RETURNS trigger AS $$
+        BEGIN
+            IF OLD.created_at > CURRENT_TIMESTAMP - INTERVAL '90 days' THEN
+                RAISE EXCEPTION 'audit_events are retained for 90 days';
+            END IF;
+            RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER audit_events_retention
+        BEFORE DELETE ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION enforce_audit_event_retention()
         """
     )
 
@@ -177,7 +215,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("scheduler_leases")
     op.execute("DROP TRIGGER audit_events_immutable ON audit_events")
-    op.execute("DROP FUNCTION prevent_audit_event_mutation")
+    op.execute("DROP TRIGGER audit_events_retention ON audit_events")
+    op.execute("DROP FUNCTION prevent_audit_event_update")
+    op.execute("DROP FUNCTION enforce_audit_event_retention")
     op.drop_index("ix_audit_events_retention", table_name="audit_events")
     op.drop_table("audit_events")
     op.drop_index("ix_mcp_tokens_expires_at", table_name="mcp_tokens")
@@ -192,4 +232,6 @@ def downgrade() -> None:
     op.drop_table("account_snapshots")
     op.drop_index("ix_account_policies_policy_version", table_name="account_policies")
     op.drop_table("account_policies")
+    op.execute("DROP TRIGGER game_accounts_policy_version_monotonic ON game_accounts")
+    op.execute("DROP FUNCTION prevent_game_account_policy_version_decrease")
     op.drop_table("game_accounts")
