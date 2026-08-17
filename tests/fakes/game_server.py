@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -26,6 +27,9 @@ class FakeGameServer:
         self._routes: dict[tuple[str, str], RegisteredResponse] = {}
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
+        self.fail_next_reads = 0
+        self.timeout_next_mutation = False
+        self.timeout_delay_seconds = 0.2
 
     @property
     def url(self) -> str:
@@ -74,6 +78,17 @@ class FakeGameServer:
                     RecordedRequest(self.command, path, recorded_headers, json_body)
                 )
 
+                is_read = self.command == "GET"
+                should_timeout = (is_read and fake.fail_next_reads > 0) or (
+                    not is_read and fake.timeout_next_mutation
+                )
+                if should_timeout:
+                    if is_read:
+                        fake.fail_next_reads -= 1
+                    else:
+                        fake.timeout_next_mutation = False
+                    time.sleep(fake.timeout_delay_seconds)
+
                 response = fake._routes.get((self.command, path))
                 if response is None:
                     self._send_json(404, {"detail": "not found"})
@@ -86,7 +101,10 @@ class FakeGameServer:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
-                self.wfile.write(encoded)
+                try:
+                    self.wfile.write(encoded)
+                except BrokenPipeError:
+                    pass
 
             def log_message(self, format: str, *args: object) -> None:
                 return
