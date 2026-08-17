@@ -1,7 +1,9 @@
 # PlaceGame Inventory and Warehouse Design
 
-**Date:** 2026-08-17  
-**Status:** Approved design, pending written-spec review  
+**Date:** 2026-08-17
+
+**Status:** Approved design, pending written-spec review
+
 **Parent specification:** `2026-08-17-placegame-mcp-core-design.md`
 
 ## 1. Goal

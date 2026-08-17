@@ -1,7 +1,9 @@
 # PlaceGame WebUI and Public Deployment Design
 
-**Date:** 2026-08-17  
-**Status:** Approved design, pending written-spec review  
+**Date:** 2026-08-17
+
+**Status:** Approved design, pending written-spec review
+
 **Parent specification:** `2026-08-17-placegame-mcp-core-design.md`
 
 ## 1. Goal
@@ -224,4 +226,3 @@ WebUI tests may automate this management interface. They never drive or inspect 
 - Manual high-value inventory actions cannot execute without an unexpired confirmed plan.
 - Account, job, and alert views remain usable on desktop and mobile.
 - The public deployment passes the documented TLS, cookie, CSRF, CSP, rate-limit, and secret-redaction checks.
-

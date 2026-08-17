@@ -1,7 +1,9 @@
 # PlaceGame Multi-Account MCP Core Design
 
-**Date:** 2026-08-17  
-**Status:** Approved design, pending written-spec review  
+**Date:** 2026-08-17
+
+**Status:** Approved design, pending written-spec review
+
 **Related specifications:**
 
 - `2026-08-17-placegame-inventory-design.md`
@@ -348,4 +350,3 @@ External notification channels are not required in the first release, but audit 
 - A simulated ambiguous timeout never causes a duplicate verified action.
 - Disabling or pausing one account immediately prevents its new mutations without affecting others.
 - MCP outputs and logs contain no passwords, full session tokens, encryption keys, or TOTP secrets.
-
