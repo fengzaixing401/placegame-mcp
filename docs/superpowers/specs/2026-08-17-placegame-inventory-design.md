@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-17
 
-**Status:** Approved design, pending written-spec review
+**Status:** Approved design
 
 **Parent specification:** `2026-08-17-placegame-mcp-core-design.md`
 
@@ -54,6 +54,7 @@ The module uses typed wrappers for the observed endpoints:
 - `POST /api/equipment/auto-decompose`, with no body. Scheduled cleanup does not use this endpoint because it does not provide an immediate per-execution preview; the WebUI may expose it only as a confirmation-required action.
 - `POST /api/inventory/recycle-preview`, with `{ itemId: string, amount: number }`.
 - `POST /api/inventory/recycle`, with `{ itemId: string, amount: number }`.
+- `POST /api/inventory/use-item`, with `{ itemId: string }`; every use remains confirmation-required.
 - `POST /api/equipment/wear`, `POST /api/equipment/take-off`, and `POST /api/equipment/toggle-lock`, each with `{ equipmentId: string }`.
 - `POST /api/warehouse/deposit` and `POST /api/warehouse/withdraw`, each with `{ entryType: "equipment" | "item", entryId: string }`.
 

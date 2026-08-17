@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-17
 
-**Status:** Approved design, pending written-spec review
+**Status:** Approved design
 
 **Related specifications:**
 
@@ -89,9 +89,12 @@ Responsibilities:
   - `POST /api/professions/settle`
   - `POST /api/professions/queue/enqueue`
   - `POST /api/professions/supply/equip`
-  - safe reward and inventory endpoints described in the related specifications.
+  - safe reward endpoints `POST /api/daily/claim` with `{ point: number }`, `/api/quests/claim` with `{ questKey: string }`, `/api/achievements/claim` with `{ achievementKey: string }`, `/api/codex/claim` with `{ rewardKey: string }`, and `/api/mail/claim` with `{ mailId: string }`.
+  - inventory endpoints described in the inventory specification.
 
 The client does not accept a URL or path supplied by an MCP caller. Each operation maps to a typed internal method.
+
+World collaboration sends `POST /api/boss/assist` with `{ bossKey: string }`; it does not reuse the ordinary challenge or preview body.
 
 ### 5.2 Account service
 
