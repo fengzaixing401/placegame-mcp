@@ -1,0 +1,25 @@
+import base64
+
+import pytest
+from pydantic import SecretStr
+
+from placegame.config import Settings
+from tests.fakes.game_server import FakeGameServer
+
+
+TEST_MASTER_KEY_B64 = base64.b64encode(bytes(range(32))).decode("ascii")
+
+
+@pytest.fixture
+def fake_game():
+    with FakeGameServer() as server:
+        yield server
+
+
+@pytest.fixture
+def settings(fake_game: FakeGameServer) -> Settings:
+    return Settings(
+        test_mode=True,
+        game_base_url=fake_game.url,
+        master_key_b64=SecretStr(TEST_MASTER_KEY_B64),
+    )
