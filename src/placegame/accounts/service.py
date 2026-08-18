@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from placegame.contracts import Actor
@@ -45,6 +46,7 @@ T = TypeVar("T")
 Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
 Jitter = Callable[[], float]
+StateFingerprintResolver = Callable[[GameApi], Awaitable[str]]
 
 
 if TYPE_CHECKING:
@@ -178,8 +180,21 @@ class AccountService:
             raise AuthenticationRequired() from None
         async with self.sessions.begin() as session:
             async with identity_lock(session, bootstrap_id):
-                existing = await self._find_identity(session, bootstrap_id)
-                if existing is not None:
+                if await self.repository.has_unresolved_identity(session):
+                    await self._audit(
+                        session,
+                        actor=actor,
+                        account_id=None,
+                        action="account.identity.conflict",
+                        result={
+                            "status": "rejected",
+                            "reason": "unresolved_historical_identity",
+                        },
+                    )
+                    result = None
+                elif (
+                    existing := await self._find_identity(session, bootstrap_id)
+                ) is not None:
                     await self._audit(
                         session,
                         actor=actor,
@@ -228,8 +243,23 @@ class AccountService:
         now = self.clock()
         async with self.sessions.begin() as session:
             async with identity_lock(session, bootstrap.account_id):
-                existing = await self._find_identity(session, bootstrap.account_id)
-                if existing is not None:
+                if await self.repository.has_unresolved_identity(session):
+                    await self._audit(
+                        session,
+                        actor=actor,
+                        account_id=None,
+                        action="account.identity.conflict",
+                        result={
+                            "status": "rejected",
+                            "reason": "unresolved_historical_identity",
+                        },
+                    )
+                    result = None
+                elif (
+                    existing := await self._find_identity(
+                        session, bootstrap.account_id
+                    )
+                ) is not None:
                     await self._audit(
                         session,
                         actor=actor,
@@ -266,7 +296,7 @@ class AccountService:
         normalized = self._normalize_label(label)
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 self._reject_removal_marker(record)
                 before = {"label": record.label}
                 record.label = normalized
@@ -295,21 +325,32 @@ class AccountService:
         result: ManagedAccount | None = None
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 self._reject_removal_marker(record)
+                if record.game_account_id is None:
+                    try:
+                        stored_identity = await self._resolve_stored_identity(record)
+                    except AuthenticationRequired:
+                        pending = AuthenticationRequired()
+                    else:
+                        if not await self._bind_or_match_identity(
+                            session, record, stored_identity, actor
+                        ):
+                            pending = AccountIdentityConflict()
                 current_username = record.get_game_username(self.secret_box)
                 proposed_username = username or current_username
                 verified: tuple[str, datetime | None, GameApi, str] | None = None
-                if proposed_username:
+                if pending is None and proposed_username:
                     try:
                         verified = await self._login_and_bootstrap(
                             proposed_username, password
                         )
                     except AccountError:
                         pass
-                if verified is None or proposed_username is None:
+                if pending is None and verified is None:
                     pending = AuthenticationRequired()
-                else:
+                elif pending is None:
+                    assert verified is not None
                     token, expiry, _api, verified_identity = verified
                     if not await self._bind_or_match_identity(
                         session, record, verified_identity, actor
@@ -356,14 +397,25 @@ class AccountService:
         bootstrap_id: str | None = None
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 self._reject_removal_marker(record)
-                try:
-                    api = self.game_factory(session_token)
-                    bootstrap = await api.bootstrap()
-                    bootstrap_id = bootstrap.account_id
-                except SessionRejected:
-                    pending = AuthenticationRequired()
+                if record.game_account_id is None:
+                    try:
+                        stored_identity = await self._resolve_stored_identity(record)
+                    except AuthenticationRequired:
+                        pending = AuthenticationRequired()
+                    else:
+                        if not await self._bind_or_match_identity(
+                            session, record, stored_identity, actor
+                        ):
+                            pending = AccountIdentityConflict()
+                if pending is None:
+                    try:
+                        api = self.game_factory(session_token)
+                        bootstrap = await api.bootstrap()
+                        bootstrap_id = bootstrap.account_id
+                    except SessionRejected:
+                        pending = AuthenticationRequired()
                 if pending is None:
                     if not await self._bind_or_match_identity(
                         session, record, bootstrap_id, actor
@@ -411,7 +463,7 @@ class AccountService:
             raise ValueError("pause reason is required")
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 self._reject_removal_marker(record)
                 record.paused_reason = reason.strip()
                 await self._audit(
@@ -425,7 +477,7 @@ class AccountService:
     async def resume(self, account_id: UUID, *, actor: Actor) -> None:
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 self._reject_removed(record)
                 if record.paused_reason == "removing":
                     raise AccountPaused() from None
@@ -444,7 +496,7 @@ class AccountService:
         # Flip the admission flag in its own short transaction first. Existing
         # work may finish, while every new mutation observes disabled state.
         async with self.sessions.begin() as session:
-            record = await self._require(session, account_id)
+            record = await self._require_for_update(session, account_id)
             if record.paused_reason == "removed":
                 return RemovalReceipt(account_id, self.clock(), 0)
             record.enabled = False
@@ -453,7 +505,7 @@ class AccountService:
 
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 disabled_jobs = await self.repository.disable_jobs(session, account_id)
                 record.enabled = False
                 record.paused_reason = "removed"
@@ -480,7 +532,7 @@ class AccountService:
     ) -> SessionState:
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 resolution = await self._ensure_locked(session, record, actor)
                 return resolution.state
 
@@ -494,7 +546,7 @@ class AccountService:
         pending: AccountError | None = None
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 self._require_mutable(record)
                 resolution = await self._ensure_locked(
                     session, record, Actor("scheduler", "locked-context")
@@ -513,7 +565,7 @@ class AccountService:
     async def snapshot(self, account_id: UUID, *, actor: Actor) -> AccountSnapshot:
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 resolution = await self._ensure_locked(session, record, actor)
                 return await self._save_snapshot(
                     session,
@@ -529,6 +581,7 @@ class AccountService:
         *,
         actor: Actor,
         plan_id: UUID | None = None,
+        state_fingerprint: StateFingerprintResolver | None = None,
         verify: Callable[[GameApi, T | None], Awaitable[bool]] | None = None,
     ) -> MutationOutcome[T]:
         pending: Exception | None = None
@@ -540,7 +593,8 @@ class AccountService:
             async with account_lock(session, account_id):
                 try:
                     for attempt in range(3):
-                        record = await self._require(session, account_id)
+                        validated_plan_id = None
+                        record = await self._require_for_update(session, account_id)
                         validated_account_id = record.id
                         self._require_mutable(record)
                         resolution = await self._ensure_locked(session, record, actor)
@@ -550,21 +604,38 @@ class AccountService:
                             session, record, resolution, authenticated=True
                         )
                         policy = await self.policy_provider.get(account_id)
+                        api = resolution.api
                         candidate = (
-                            await session.get(ActionPlan, plan_id)
+                            await session.get(
+                                ActionPlan, plan_id, populate_existing=True
+                            )
                             if plan_id is not None
                             else None
                         )
-                        if candidate is not None and candidate.account_id == account_id:
+                        if plan_id is not None:
+                            if candidate is None or candidate.account_id != account_id:
+                                raise PlanPreconditionFailed() from None
                             validated_plan_id = plan_id
                         await self._check_plan(
-                            session,
+                            candidate,
                             plan_id,
                             account_id,
                             policy_version=policy.version,
-                            state_fingerprint=snapshot.state_fingerprint,
                         )
-                        api = resolution.api
+                        if plan_id is not None:
+                            if state_fingerprint is None:
+                                raise PlanPreconditionFailed() from None
+                            try:
+                                resolved_fingerprint = await state_fingerprint(api)
+                            except GameError:
+                                raise
+                            if (
+                                not isinstance(resolved_fingerprint, str)
+                                or not 1 <= len(resolved_fingerprint) <= 128
+                                or candidate is None
+                                or resolved_fingerprint != candidate.state_fingerprint
+                            ):
+                                raise PlanPreconditionFailed() from None
                         try:
                             value = await operation(api)
                         except asyncio.CancelledError as exc:
@@ -656,6 +727,8 @@ class AccountService:
                                     result={"status": "cancelled", "outcome": "ambiguous"},
                                 )
                                 break
+                            except GameSchemaMismatch:
+                                raise
                             except Exception:
                                 raise ReconciliationRequired() from None
                             if not verified:
@@ -702,7 +775,7 @@ class AccountService:
     ) -> None:
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
-                record = await self._require(session, account_id)
+                record = await self._require_for_update(session, account_id)
                 self._reject_removal_marker(record)
                 record.enabled = enabled
                 await self._audit(
@@ -932,16 +1005,14 @@ class AccountService:
 
     async def _check_plan(
         self,
-        session: AsyncSession,
+        plan: ActionPlan | None,
         plan_id: UUID | None,
         account_id: UUID,
         *,
         policy_version: int,
-        state_fingerprint: str,
     ) -> None:
         if plan_id is None:
             return
-        plan = await session.get(ActionPlan, plan_id)
         if (
             plan is None
             or plan.account_id != account_id
@@ -949,7 +1020,6 @@ class AccountService:
             or plan.execution_state not in {"pending", "confirmed"}
             or (plan.confirmation_required and plan.confirmed_at is None)
             or plan.policy_version != policy_version
-            or plan.state_fingerprint != state_fingerprint
         ):
             raise PlanPreconditionFailed() from None
 
@@ -990,6 +1060,14 @@ class AccountService:
     @staticmethod
     async def _require(session: AsyncSession, account_id: UUID) -> GameAccount:
         record = await session.get(GameAccount, account_id)
+        if record is None:
+            raise AccountNotFound() from None
+        return record
+
+    async def _require_for_update(
+        self, session: AsyncSession, account_id: UUID
+    ) -> GameAccount:
+        record = await self.repository.get_for_update(session, account_id)
         if record is None:
             raise AccountNotFound() from None
         return record
@@ -1038,6 +1116,25 @@ class AccountService:
             result={"status": "paused", "severity": "critical"},
         )
 
+    async def _resolve_stored_identity(self, record: GameAccount) -> str:
+        if record.auth_mode == "credentials":
+            username = record.get_game_username(self.secret_box)
+            password = record.get_password(self.secret_box)
+            if not username or not password:
+                raise AuthenticationRequired() from None
+            _token, _expiry, _api, identity = await self._login_and_bootstrap(
+                username, password
+            )
+            return identity
+
+        token = record.get_session_token(self.secret_box)
+        if not token:
+            raise AuthenticationRequired() from None
+        try:
+            return (await self.game_factory(token).bootstrap()).account_id
+        except SessionRejected:
+            raise AuthenticationRequired() from None
+
     async def _bind_or_match_identity(
         self,
         session: AsyncSession,
@@ -1048,7 +1145,18 @@ class AccountService:
         if not bootstrap_id:
             return False
         if record.game_account_id is None:
-            record.game_account_id = bootstrap_id
+            existing = await self._find_identity(session, bootstrap_id)
+            if existing is not None and existing.id != record.id:
+                await self._identity_mismatch(session, record, actor)
+                return False
+            try:
+                async with session.begin_nested():
+                    record.game_account_id = bootstrap_id
+                    await session.flush([record])
+            except IntegrityError:
+                await session.refresh(record)
+                await self._identity_mismatch(session, record, actor)
+                return False
             return True
         if record.game_account_id == bootstrap_id:
             return True
@@ -1083,5 +1191,6 @@ __all__ = [
     "PolicyProvider",
     "RemovalReceipt",
     "SessionState",
+    "StateFingerprintResolver",
     "default_token_expiry",
 ]

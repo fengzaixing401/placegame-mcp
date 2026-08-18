@@ -14,6 +14,24 @@ class AccountRepository:
     async def get(self, session: AsyncSession, account_id: UUID) -> GameAccount | None:
         return await session.get(GameAccount, account_id)
 
+    async def get_for_update(
+        self, session: AsyncSession, account_id: UUID
+    ) -> GameAccount | None:
+        return await session.scalar(
+            select(GameAccount)
+            .where(GameAccount.id == account_id)
+            .with_for_update()
+        )
+
+    async def has_unresolved_identity(self, session: AsyncSession) -> bool:
+        return bool(
+            await session.scalar(
+                select(GameAccount.id)
+                .where(GameAccount.game_account_id.is_(None))
+                .limit(1)
+            )
+        )
+
     async def add_audit(
         self,
         session: AsyncSession,

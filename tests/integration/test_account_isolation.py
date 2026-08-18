@@ -197,12 +197,17 @@ async def test_ten_accounts_keep_credentials_snapshots_plans_jobs_and_policy_iso
     await isolation_env.service.pause(accounts[0].id, "operator", actor=ADMIN)
     await isolation_env.service.resume(accounts[0].id, actor=ADMIN)
     isolation_env.fake.commit_then_timeout("idle_collect", accounts[0].id)
+
+    async def plan_fingerprint(api):
+        return snapshots[accounts[0].id].state_fingerprint
+
     with pytest.raises(ReconciliationRequired):
         await isolation_env.service.mutate(
             accounts[0].id,
             lambda api: api.idle_collect(),
             actor=SCHEDULER,
             plan_id=plans[accounts[0].id].id,
+            state_fingerprint=plan_fingerprint,
         )
     await isolation_env.service.disable(accounts[0].id, actor=ADMIN)
 
@@ -287,3 +292,119 @@ async def test_disable_drain_removes_only_after_lock_drains(isolation_env):
 
     assert receipt.account_id == account.id
     assert (await isolation_env.service.get(account.id)).paused_reason == "removed"
+
+
+async def test_credential_edit_owns_row_before_removal_marker(isolation_env):
+    account, _, password, current_token = await isolation_env.add_credentials(
+        "credential edit"
+    )
+    barrier = isolation_env.fake.bootstrap_barrier(current_token)
+    holder_acquired = asyncio.Event()
+    holder_release = asyncio.Event()
+
+    async def hold_account_lock_until_released():
+        async with isolation_env.sessions() as session:
+            async with session.begin():
+                async with account_lock(session, account.id):
+                    holder_acquired.set()
+                    await holder_release.wait()
+
+    async def wait_until_paused_reason(target: str):
+        for _ in range(50):
+            if (await isolation_env.service.get(account.id)).paused_reason == target:
+                return
+            await asyncio.sleep(0.01)
+        pytest.fail(f"paused reason did not become {target}")
+
+    edit = asyncio.create_task(
+        isolation_env.service.update_credentials(
+            account.id, None, password, actor=ADMIN
+        )
+    )
+    holder = None
+    removal = None
+    try:
+        await asyncio.wait_for(barrier.started.wait(), timeout=2)
+        holder = asyncio.create_task(hold_account_lock_until_released())
+        removal = asyncio.create_task(
+            isolation_env.service.disable_drain_remove(account.id, actor=ADMIN)
+        )
+        await asyncio.sleep(0.05)
+
+        observed = await isolation_env.service.get(account.id)
+        assert observed.paused_reason != "removing"
+
+        barrier.release.set()
+        await asyncio.wait_for(edit, timeout=2)
+        await asyncio.wait_for(holder_acquired.wait(), timeout=2)
+        await wait_until_paused_reason("removing")
+        removal.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await removal
+        assert (
+            await isolation_env.service.get(account.id)
+        ).paused_reason == "removing"
+        holder_release.set()
+    finally:
+        barrier.release.set()
+        holder_release.set()
+        tasks = [task for task in (edit, holder, removal) if task is not None]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_token_edit_owns_row_before_removal_marker(isolation_env):
+    account, current_token = await isolation_env.add_token("token edit")
+    alias_token = f"alias-{uuid4().hex}"
+    isolation_env.fake.alias_token(alias_token, current_token)
+    barrier = isolation_env.fake.bootstrap_barrier(alias_token)
+    holder_acquired = asyncio.Event()
+    holder_release = asyncio.Event()
+
+    async def hold_account_lock_until_released():
+        async with isolation_env.sessions() as session:
+            async with session.begin():
+                async with account_lock(session, account.id):
+                    holder_acquired.set()
+                    await holder_release.wait()
+
+    async def wait_until_paused_reason(target: str):
+        for _ in range(50):
+            if (await isolation_env.service.get(account.id)).paused_reason == target:
+                return
+            await asyncio.sleep(0.01)
+        pytest.fail(f"paused reason did not become {target}")
+
+    edit = asyncio.create_task(
+        isolation_env.service.update_token_only(
+            account.id, alias_token, actor=ADMIN
+        )
+    )
+    holder = None
+    removal = None
+    try:
+        await asyncio.wait_for(barrier.started.wait(), timeout=2)
+        holder = asyncio.create_task(hold_account_lock_until_released())
+        removal = asyncio.create_task(
+            isolation_env.service.disable_drain_remove(account.id, actor=ADMIN)
+        )
+        await asyncio.sleep(0.05)
+
+        observed = await isolation_env.service.get(account.id)
+        assert observed.paused_reason != "removing"
+
+        barrier.release.set()
+        await asyncio.wait_for(edit, timeout=2)
+        await asyncio.wait_for(holder_acquired.wait(), timeout=2)
+        await wait_until_paused_reason("removing")
+        removal.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await removal
+        assert (
+            await isolation_env.service.get(account.id)
+        ).paused_reason == "removing"
+        holder_release.set()
+    finally:
+        barrier.release.set()
+        holder_release.set()
+        tasks = [task for task in (edit, holder, removal) if task is not None]
+        await asyncio.gather(*tasks, return_exceptions=True)

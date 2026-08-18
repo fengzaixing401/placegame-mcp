@@ -78,7 +78,9 @@ class LoginResult(ResponseData):
 
 
 class BootstrapState(ResponseData):
-    account_id: str = Field(alias="accountId", min_length=1)
+    account_id: str = Field(
+        alias="accountId", min_length=1, max_length=128, pattern=r"\S"
+    )
 
 
 class Catalog(ResponseData):

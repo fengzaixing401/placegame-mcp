@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -41,6 +42,12 @@ class RecordedRequest:
     path: str
     headers: dict[str, str]
     json_body: Any
+
+
+@dataclass(frozen=True)
+class BootstrapBarrier:
+    started: asyncio.Event
+    release: asyncio.Event
 
 
 @dataclass(frozen=True)
@@ -233,6 +240,9 @@ class FakeGameApiFactory:
         self._mutation_counts: dict[tuple[UUID, str], int] = {}
         self._bootstrap_counts: dict[UUID, int] = {}
         self._bootstrap_failures: dict[UUID, tuple[int, GameError]] = {}
+        self._idle_summary_counts: dict[UUID, int] = {}
+        self._idle_summary_failures: dict[UUID, int] = {}
+        self._bootstrap_barriers: dict[str, BootstrapBarrier] = {}
         self.login_count = 0
 
     def register_credentials(
@@ -246,6 +256,14 @@ class FakeGameApiFactory:
         state = _FakeAccountState(account_id, None, None, token)
         self._states_by_id[account_id] = state
         self._states_by_token[token] = state
+
+    def alias_token(self, alias_token: str, target_token: str) -> None:
+        self._states_by_token[alias_token] = self._states_by_token[target_token]
+
+    def bootstrap_barrier(self, token: str) -> BootstrapBarrier:
+        barrier = BootstrapBarrier(asyncio.Event(), asyncio.Event())
+        self._bootstrap_barriers[token] = barrier
+        return barrier
 
     def bind_account_id(self, registered_id: UUID, managed_id: UUID) -> None:
         state = self._states_by_id.pop(registered_id)
@@ -290,6 +308,13 @@ class FakeGameApiFactory:
         self._bootstrap_failures[account_id] = (
             self._bootstrap_counts.get(account_id, 0) + after_successes,
             failure,
+        )
+
+    def fail_idle_summary_schema(
+        self, account_id: UUID, *, after_successes: int
+    ) -> None:
+        self._idle_summary_failures[account_id] = (
+            self._idle_summary_counts.get(account_id, 0) + after_successes
         )
 
     def commit_then_timeout(self, operation: str, account_id: UUID) -> None:
@@ -341,6 +366,10 @@ class _FakeGameApi:
         raise SessionRejected()
 
     async def bootstrap(self) -> BootstrapState:
+        barrier = self._factory._bootstrap_barriers.get(self._session_token or "")
+        if barrier is not None:
+            barrier.started.set()
+            await barrier.release.wait()
         state = self._factory._state_for_token(self._session_token)
         failure = self._factory._bootstrap_failures.get(state.runtime_id)
         if failure is not None and self._factory._bootstrap_counts.get(state.runtime_id, 0) >= failure[0]:
@@ -352,6 +381,14 @@ class _FakeGameApi:
 
     async def idle_summary(self) -> IdleSummary:
         state = self._factory._state_for_token(self._session_token)
+        failure_at = self._factory._idle_summary_failures.get(state.runtime_id)
+        if failure_at is not None and self._factory._idle_summary_counts.get(
+            state.runtime_id, 0
+        ) >= failure_at:
+            raise GameSchemaMismatch("idle_summary", {"status_code": 200})
+        self._factory._idle_summary_counts[state.runtime_id] = (
+            self._factory._idle_summary_counts.get(state.runtime_id, 0) + 1
+        )
         return IdleSummary(
             accumulatedSeconds=state.accumulated_seconds,
             capacitySeconds=state.capacity_seconds,

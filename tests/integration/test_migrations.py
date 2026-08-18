@@ -1,4 +1,6 @@
 import json
+import asyncio
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -9,9 +11,215 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, StatementError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from placegame.contracts import decode_encrypted_secret, encode_encrypted_secret, encrypted_aad
-from placegame.errors import InvalidSecret
+from placegame.accounts.service import AccountService
+from placegame.contracts import Actor, decode_encrypted_secret, encode_encrypted_secret, encrypted_aad
+from placegame.errors import AccountIdentityConflict, InvalidSecret
 from placegame.models import ActionPlan, AuditEvent, GameAccount
+from placegame.security.crypto import SecretBox
+from tests.fakes.game_server import FakeGameApiFactory
+from tests.unit.test_accounts import MutableClock, StubPolicyProvider
+
+
+ADMIN = Actor("webui", "admin")
+
+
+@dataclass
+class LegacyIdentityEnvironment:
+    service: AccountService
+    sessions: async_sessionmaker
+    fake: FakeGameApiFactory
+    first_id: UUID
+    second_id: UUID
+    first_token: str = field(repr=False)
+    second_token: str = field(repr=False)
+    shared_identity: UUID
+
+
+@pytest.fixture
+async def legacy_identity_env(postgres_url, alembic_config, secret_box: SecretBox):
+    config = alembic_config(database_url=postgres_url)
+    await asyncio.to_thread(command.downgrade, config, "base")
+    await asyncio.to_thread(command.upgrade, config, "001_core")
+    first_id = uuid4()
+    second_id = uuid4()
+    shared_identity = uuid4()
+    first_token = f"legacy-credential-token-{shared_identity.hex}"
+    second_token = f"legacy-token-{shared_identity.hex}"
+    username = f"legacy-user-{shared_identity.hex}"
+    password = f"legacy-password-{shared_identity.hex}"
+    now = datetime(2026, 8, 18, 4, 0, tzinfo=timezone.utc)
+
+    def seal(value: str, account_id: UUID, column: str) -> bytes:
+        return encode_encrypted_secret(
+            secret_box.encrypt(
+                value,
+                aad=encrypted_aad("game_accounts", account_id, column),
+            )
+        )
+
+    engine = create_async_engine(postgres_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO game_accounts (
+                        id, label, game_username, auth_mode, password,
+                        session_token, enabled, policy_version, created_at,
+                        updated_at, auth_failure_count
+                    ) VALUES (
+                        :id, :label, :game_username, :auth_mode, :password,
+                        :session_token, true, 1, :created_at, :updated_at, 0
+                    )
+                    """
+                ),
+                [
+                    {
+                        "id": first_id,
+                        "label": "legacy credentials",
+                        "game_username": seal(username, first_id, "game_username"),
+                        "auth_mode": "credentials",
+                        "password": seal(password, first_id, "password"),
+                        "session_token": seal(first_token, first_id, "session_token"),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                    {
+                        "id": second_id,
+                        "label": "legacy token",
+                        "game_username": None,
+                        "auth_mode": "token_only",
+                        "password": None,
+                        "session_token": seal(second_token, second_id, "session_token"),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                ],
+            )
+        await asyncio.to_thread(command.upgrade, config, "head")
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        fake = FakeGameApiFactory()
+        fake.register_credentials(shared_identity, username, password, first_token)
+        fake.redirect_token(second_token, first_token)
+        service = AccountService(
+            sessions,
+            secret_box,
+            fake,
+            policy_provider=StubPolicyProvider(),
+            clock=MutableClock(now),
+            sleeper=asyncio.sleep,
+            jitter=lambda: 0.0,
+        )
+        yield LegacyIdentityEnvironment(
+            service=service,
+            sessions=sessions,
+            fake=fake,
+            first_id=first_id,
+            second_id=second_id,
+            first_token=first_token,
+            second_token=second_token,
+            shared_identity=shared_identity,
+        )
+    finally:
+        await engine.dispose()
+        await asyncio.to_thread(command.upgrade, config, "head")
+
+
+@pytest.mark.parametrize("mode", ["token", "credentials"])
+async def test_unresolved_historical_row_blocks_new_enrollment(
+    legacy_identity_env, mode
+):
+    environment = legacy_identity_env
+    unrelated_id = uuid4()
+    unrelated_token = f"unrelated-{unrelated_id.hex}"
+    if mode == "token":
+        environment.fake.register_token(unrelated_id, unrelated_token)
+        enroll = environment.service.add_token_only(
+            "new", unrelated_token, actor=ADMIN
+        )
+    else:
+        username = f"unrelated-user-{unrelated_id.hex}"
+        password = f"unrelated-password-{unrelated_id.hex}"
+        environment.fake.register_credentials(
+            unrelated_id, username, password, unrelated_token
+        )
+        enroll = environment.service.add_credentials(
+            "new", username, password, actor=ADMIN
+        )
+    with pytest.raises(AccountIdentityConflict):
+        await enroll
+    async with environment.sessions() as session:
+        rows = (await session.scalars(select(GameAccount))).all()
+        audits = (await session.scalars(select(AuditEvent))).all()
+    assert {row.id for row in rows} == {
+        environment.first_id,
+        environment.second_id,
+    }
+    rendered = repr([(row.account_id, row.result) for row in audits])
+    assert (
+        None,
+        {
+            "status": "rejected",
+            "reason": "unresolved_historical_identity",
+        },
+    ) in [(row.account_id, row.result) for row in audits]
+    assert unrelated_token not in rendered
+    assert environment.first_token not in rendered
+    assert environment.second_token not in rendered
+
+
+async def test_historical_replacement_binds_stored_identity_before_proposal(
+    legacy_identity_env,
+):
+    environment = legacy_identity_env
+    other_id = uuid4()
+    other_token = f"other-{other_id.hex}"
+    environment.fake.register_token(other_id, other_token)
+    async with environment.sessions() as session:
+        before = await session.get(GameAccount, environment.first_id)
+        assert before is not None
+        before_token = before._session_token
+    with pytest.raises(AccountIdentityConflict):
+        await environment.service.update_token_only(
+            environment.first_id, other_token, actor=ADMIN
+        )
+    async with environment.sessions() as session:
+        row = await session.get(GameAccount, environment.first_id)
+        audits = (await session.scalars(select(AuditEvent))).all()
+    assert row is not None
+    assert row.game_account_id == str(environment.shared_identity)
+    assert row._session_token == before_token
+    rendered = repr([(audit.action, audit.result) for audit in audits])
+    assert other_token not in rendered
+    assert environment.first_token not in rendered
+
+
+async def test_concurrent_historical_binding_returns_sanitized_conflict(
+    legacy_identity_env,
+):
+    environment = legacy_identity_env
+    results = await asyncio.gather(
+        environment.service.update_token_only(
+            environment.first_id, environment.first_token, actor=ADMIN
+        ),
+        environment.service.update_token_only(
+            environment.second_id, environment.second_token, actor=ADMIN
+        ),
+        return_exceptions=True,
+    )
+    assert sum(not isinstance(value, Exception) for value in results) == 1
+    assert sum(isinstance(value, AccountIdentityConflict) for value in results) == 1
+    async with environment.sessions() as session:
+        rows = (await session.scalars(select(GameAccount))).all()
+        audits = (await session.scalars(select(AuditEvent))).all()
+    assert sum(
+        row.game_account_id == str(environment.shared_identity) for row in rows
+    ) == 1
+    rendered = repr(results) + repr(
+        [(audit.action, audit.result) for audit in audits]
+    )
+    assert environment.first_token not in rendered
+    assert environment.second_token not in rendered
 
 
 def test_migrations_upgrade_and_match_metadata(postgres_url, alembic_config):

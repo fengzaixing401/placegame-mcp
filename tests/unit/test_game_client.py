@@ -5,12 +5,14 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from placegame.errors import (
     AmbiguousMutation,
     ContractChanged,
     GameConflict,
     GameError,
+    GameHttpError,
     GameRateLimited,
     GameSchemaMismatch,
     GameUnavailable,
@@ -20,7 +22,11 @@ from placegame.errors import (
 )
 from placegame.game.client import HttpGameClient
 from placegame.game.registry import EndpointSpec, REGISTRY
-from placegame.game.schemas import BossChallengeRequest, BossPreviewRequest
+from placegame.game.schemas import (
+    BootstrapState,
+    BossChallengeRequest,
+    BossPreviewRequest,
+)
 
 
 VALID_BOSS_DIFFICULTY = {
@@ -81,6 +87,17 @@ VALID_RESPONSES: dict[str, dict[str, Any]] = {
     "profession_supply_equip": {"equipped": True},
     "reward_claim": {"claimed": True},
 }
+
+
+@pytest.mark.parametrize("account_id", [" ", "x" * 129])
+def test_bootstrap_account_identity_bounds(account_id: str):
+    with pytest.raises(ValidationError):
+        BootstrapState(accountId=account_id)
+
+
+@pytest.mark.parametrize("account_id", ["x", "x" * 128])
+def test_bootstrap_account_identity_boundary_values(account_id: str):
+    assert BootstrapState(accountId=account_id).account_id == account_id
 
 
 @pytest.fixture
@@ -203,22 +220,22 @@ async def test_all_fixed_post_bodies_use_exact_api_aliases(fake_game, game_clien
         register_success(fake_game, method, path, response_key)
 
     preview = BossPreviewRequest(
-        boss_key="boss-1",
+        bossKey="boss-1",
         difficulty="hard",
-        selected_skill_keys=["skill-1", "skill-2"],
-        buff_key="guard",
-        affix_key="affix-1",
-        target_slot="weapon",
-        use_material_boost=False,
+        selectedSkillKeys=["skill-1", "skill-2"],
+        buffKey="guard",
+        affixKey="affix-1",
+        targetSlot="weapon",
+        useMaterialBoost=False,
     )
     challenge = BossChallengeRequest(
-        boss_key="boss-2",
+        bossKey="boss-2",
         difficulty="nightmare",
-        selected_skill_keys=["skill-3"],
-        buff_key="focus",
-        affix_key=None,
-        target_slot="armor",
-        use_material_boost=True,
+        selectedSkillKeys=["skill-3"],
+        buffKey="focus",
+        affixKey=None,
+        targetSlot="armor",
+        useMaterialBoost=True,
     )
 
     await game_client.view_sections(("bosses", "professions"), {"bosses": "etag-1"})
@@ -372,13 +389,13 @@ async def test_fake_recursively_redacts_future_body_and_header_credentials(fake_
             "boss_preview",
             lambda client: client.boss_preview(
                 BossPreviewRequest(
-                    boss_key="boss",
+                    bossKey="boss",
                     difficulty="normal",
-                    selected_skill_keys=[],
-                    buff_key="none",
-                    affix_key=None,
-                    target_slot="weapon",
-                    use_material_boost=False,
+                    selectedSkillKeys=[],
+                    buffKey="none",
+                    affixKey=None,
+                    targetSlot="weapon",
+                    useMaterialBoost=False,
                 )
             ),
         ),
@@ -388,13 +405,13 @@ async def test_fake_recursively_redacts_future_body_and_header_credentials(fake_
             "boss_challenge",
             lambda client: client.boss_challenge(
                 BossChallengeRequest(
-                    boss_key="boss",
+                    bossKey="boss",
                     difficulty="normal",
-                    selected_skill_keys=[],
-                    buff_key="none",
-                    affix_key=None,
-                    target_slot="weapon",
-                    use_material_boost=False,
+                    selectedSkillKeys=[],
+                    buffKey="none",
+                    affixKey=None,
+                    targetSlot="weapon",
+                    useMaterialBoost=False,
                 )
             ),
         ),
@@ -452,13 +469,13 @@ async def test_missing_required_response_core_becomes_schema_mismatch(
             "/api/boss/preview",
             lambda client: client.boss_preview(
                 BossPreviewRequest(
-                    boss_key="boss",
+                    bossKey="boss",
                     difficulty="normal",
-                    selected_skill_keys=[],
-                    buff_key="none",
-                    affix_key=None,
-                    target_slot="weapon",
-                    use_material_boost=False,
+                    selectedSkillKeys=[],
+                    buffKey="none",
+                    affixKey=None,
+                    targetSlot="weapon",
+                    useMaterialBoost=False,
                 )
             ),
             {"predictedWin": "yes", "chance": "certain"},
@@ -515,13 +532,13 @@ async def test_boss_preview_rejects_incomplete_or_invalid_ranking_signals(
     with pytest.raises(GameSchemaMismatch):
         await game_client.boss_preview(
             BossPreviewRequest(
-                boss_key="boss",
+                bossKey="boss",
                 difficulty="hard",
-                selected_skill_keys=[],
-                buff_key="none",
-                affix_key=None,
-                target_slot="weapon",
-                use_material_boost=False,
+                selectedSkillKeys=[],
+                buffKey="none",
+                affixKey=None,
+                targetSlot="weapon",
+                useMaterialBoost=False,
             )
         )
 
@@ -649,13 +666,13 @@ async def test_get_and_post_reads_each_retry_exactly_three_timeouts(fake_game, g
     with pytest.raises(GameUnavailable):
         await game_client.boss_preview(
             BossPreviewRequest(
-                boss_key="boss",
+                bossKey="boss",
                 difficulty="normal",
-                selected_skill_keys=[],
-                buff_key="none",
-                affix_key=None,
-                target_slot="weapon",
-                use_material_boost=False,
+                selectedSkillKeys=[],
+                buffKey="none",
+                affixKey=None,
+                targetSlot="weapon",
+                useMaterialBoost=False,
             )
         )
 
@@ -729,6 +746,7 @@ async def test_unmapped_status_is_typed_with_allowlisted_metadata(fake_game, gam
         await game_client.catalog()
 
     assert type(captured.value).__name__ == "GameHttpError"
+    assert isinstance(captured.value, GameHttpError)
     assert captured.value.metadata == {"status_code": 400}
     assert_public_error_is_contained(
         captured.value,

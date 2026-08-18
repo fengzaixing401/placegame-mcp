@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
-from sqlalchemy import event, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from placegame.accounts.service import (
@@ -183,9 +183,173 @@ def _jwt(exp: object) -> str:
 
 def test_public_mutation_contract_keeps_none_honest():
     verifier = inspect.signature(AccountService.mutate).parameters["verify"].annotation
+    state_fingerprint = inspect.signature(AccountService.mutate).parameters[
+        "state_fingerprint"
+    ].annotation
 
     assert "T | None" in str(verifier)
     assert "T | None" in str(MutationOutcome.__annotations__["result"])
+    assert "StateFingerprintResolver" in str(state_fingerprint)
+
+
+@pytest.mark.parametrize("mode", ["token", "credentials"])
+async def test_concurrent_duplicate_enrollment_has_one_winner(account_env, mode):
+    game_identity = uuid4()
+    token = f"concurrent-{game_identity.hex}"
+    username = f"user-{game_identity.hex}"
+    password = f"password-{game_identity.hex}"
+    if mode == "token":
+        account_env.fake.register_token(game_identity, token)
+
+        async def enroll(label):
+            return await account_env.service.add_token_only(
+                label, token, actor=ADMIN
+            )
+    else:
+        account_env.fake.register_credentials(
+            game_identity, username, password, token
+        )
+
+        async def enroll(label):
+            return await account_env.service.add_credentials(
+                label, username, password, actor=ADMIN
+            )
+
+    results = await asyncio.gather(
+        enroll("first"), enroll("second"), return_exceptions=True
+    )
+    assert sum(not isinstance(value, Exception) for value in results) == 1
+    assert sum(isinstance(value, AccountIdentityConflict) for value in results) == 1
+    async with account_env.sessions() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(GameAccount)
+            .where(GameAccount.game_account_id == str(game_identity))
+        )
+    assert count == 1
+
+
+async def test_plan_requires_authoritative_fingerprint_resolver(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+        )
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+@pytest.mark.parametrize("value", ["", "x" * 129])
+async def test_plan_rejects_invalid_authoritative_fingerprint(account_env, value):
+    account, _ = await account_env.add_token()
+    plan_id = await _add_plan(account_env, account.id, "expected")
+
+    async def resolver(api):
+        return value
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=resolver,
+        )
+
+
+@pytest.mark.parametrize("domain", ["boss", "profession", "reward"])
+async def test_domain_fingerprint_is_rechecked_after_conflict(account_env, domain):
+    account, _ = await account_env.add_token()
+    current = {"value": f"{domain}-v1"}
+    plan_id = await _add_plan(account_env, account.id, current["value"])
+
+    async def resolver(api):
+        return current["value"]
+
+    async def operation(api):
+        current["value"] = f"{domain}-v2"
+        raise GameConflict("changed")
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            operation,
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=resolver,
+        )
+
+
+async def test_fresh_plan_state_is_rechecked_after_conflict(account_env):
+    account, _ = await account_env.add_token()
+    plan_id = await _add_plan(account_env, account.id, "expected")
+    attempts = 0
+
+    async def resolver(api):
+        return "expected"
+
+    async def operation(api):
+        nonlocal attempts
+        attempts += 1
+        async with account_env.sessions.begin() as session:
+            plan = await session.get(ActionPlan, plan_id)
+            assert plan is not None
+            plan.execution_state = "executed"
+        raise GameConflict("plan-changed")
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            operation,
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=resolver,
+        )
+    assert attempts == 1
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_plan_fingerprint_resolver_preserves_schema_mismatch(account_env):
+    account, _ = await account_env.add_token()
+    plan_id = await _add_plan(account_env, account.id, "expected")
+    account_env.fake.fail_idle_summary_schema(account.id, after_successes=1)
+
+    async def resolver(api):
+        await api.idle_summary()
+        return "expected"
+
+    with pytest.raises(GameSchemaMismatch):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=resolver,
+        )
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_fingerprint_resolver_is_not_used_without_plan(account_env):
+    account, _ = await account_env.add_token()
+    called = False
+
+    async def resolver(api):
+        nonlocal called
+        called = True
+        raise AssertionError("resolver must not be called without a plan")
+
+    outcome = await account_env.service.mutate(
+        account.id,
+        lambda api: api.idle_collect(),
+        actor=SCHEDULER,
+        state_fingerprint=resolver,
+    )
+    assert outcome.applied is True
+    assert called is False
 
 
 def test_public_locked_contract_returns_an_async_context_manager():
@@ -635,6 +799,17 @@ async def test_stale_policy_version_rejects_plan_before_mutation(account_env):
             plan_id=plan_id,
         )
 
+    async with account_env.sessions() as session:
+        audit = await session.scalar(
+            select(AuditEvent)
+            .where(
+                AuditEvent.account_id == account.id,
+                AuditEvent.action == "account.mutate",
+            )
+            .order_by(AuditEvent.created_at.desc())
+        )
+    assert audit is not None
+    assert audit.plan_id == plan_id
     assert account_env.fake.mutation_count("idle_collect", account.id) == 0
 
 
@@ -642,12 +817,16 @@ async def test_stale_state_fingerprint_rejects_plan_before_mutation(account_env)
     account, _ = await account_env.add_token()
     plan_id = await _add_plan(account_env, account.id, "stale-state")
 
+    async def resolver(api):
+        return "current-state"
+
     with pytest.raises(PlanPreconditionFailed):
         await account_env.service.mutate(
             account.id,
             lambda api: api.idle_collect(),
             actor=SCHEDULER,
             plan_id=plan_id,
+            state_fingerprint=resolver,
         )
 
     assert account_env.fake.mutation_count("idle_collect", account.id) == 0
@@ -658,6 +837,9 @@ async def test_policy_version_is_rechecked_after_conflict(account_env):
     snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
     plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
     attempts = 0
+
+    async def resolver(api):
+        return snapshot.state_fingerprint
 
     async def conflict_after_policy_change(api):
         nonlocal attempts
@@ -671,6 +853,7 @@ async def test_policy_version_is_rechecked_after_conflict(account_env):
             conflict_after_policy_change,
             actor=SCHEDULER,
             plan_id=plan_id,
+            state_fingerprint=resolver,
         )
 
     assert attempts == 1
@@ -679,9 +862,12 @@ async def test_policy_version_is_rechecked_after_conflict(account_env):
 
 async def test_authoritative_state_is_rechecked_after_conflict(account_env):
     account, _ = await account_env.add_token()
-    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
-    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    plan_id = await _add_plan(account_env, account.id, "idle-3600")
     attempts = 0
+
+    async def resolver(api):
+        idle = await api.idle_summary()
+        return f"idle-{idle.accumulated_seconds}"
 
     async def conflict_after_state_change(api):
         nonlocal attempts
@@ -697,6 +883,7 @@ async def test_authoritative_state_is_rechecked_after_conflict(account_env):
             conflict_after_state_change,
             actor=SCHEDULER,
             plan_id=plan_id,
+            state_fingerprint=resolver,
         )
 
     assert attempts == 1
@@ -722,6 +909,24 @@ async def test_normal_response_is_passed_to_verifier(account_env):
     assert outcome.result is not None
     assert outcome.applied is True
     assert outcome.reconciled is False
+
+
+async def test_normal_response_verifier_preserves_schema_mismatch(account_env):
+    account, _ = await account_env.add_token()
+    account_env.fake.fail_idle_summary_schema(account.id, after_successes=1)
+
+    async def verifier(api, response):
+        await api.idle_summary()
+        return True
+
+    with pytest.raises(GameSchemaMismatch):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            verify=verifier,
+        )
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
 
 
 async def test_commit_then_bootstrap_failure_requires_reconciliation_without_repeat(account_env):
