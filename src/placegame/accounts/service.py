@@ -50,8 +50,7 @@ StateFingerprintResolver = Callable[[GameApi], Awaitable[str]]
 
 
 if TYPE_CHECKING:
-    class VersionedPolicy(Protocol):
-        version: int
+    from placegame.policy.models import VersionedPolicy
 
 
 class PolicyProvider(Protocol):

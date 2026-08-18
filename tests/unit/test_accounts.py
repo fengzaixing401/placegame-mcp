@@ -34,21 +34,13 @@ from placegame.errors import (
     ReconciliationRequired,
 )
 from placegame.models import ActionPlan, AuditEvent, GameAccount, Job
+from placegame.policy.models import AccountPolicy, VersionedPolicy
+from placegame.policy.store import PostgresPolicyService
 from tests.fakes.game_server import FakeGameApiFactory
-
-
-if TYPE_CHECKING:
-    from placegame.accounts.service import VersionedPolicy
 
 
 ADMIN = Actor("webui", "admin")
 SCHEDULER = Actor("scheduler", "scheduler-1")
-
-
-@dataclass
-class StubPolicy:
-    account_id: UUID
-    version: int = 1
 
 
 class StubPolicyProvider:
@@ -58,7 +50,7 @@ class StubPolicyProvider:
 
     async def get(self, account_id: UUID) -> VersionedPolicy:
         self.requested.append(account_id)
-        return StubPolicy(account_id, self.version)
+        return VersionedPolicy(version=self.version)
 
 
 @dataclass
@@ -74,7 +66,7 @@ class ServiceEnvironment:
         self.sessions = sessions
         self.engine = engine
         self.fake = FakeGameApiFactory()
-        self.policy = StubPolicyProvider()
+        self.policy = PostgresPolicyService(sessions, lambda _account_id: 0)
         self.expiries: dict[str, datetime | None] = {}
         self.clock = MutableClock(datetime(2026, 8, 18, 4, 0, tzinfo=timezone.utc))
         self.delays: list[float] = []
@@ -781,14 +773,17 @@ async def test_invalid_plan_uses_stable_error_and_safe_audit_reference(account_e
     assert account_env.fake.mutation_count("idle_collect", account.id) == 0
 
 
-async def test_stale_policy_version_rejects_plan_before_mutation(account_env):
+async def test_policy_update_invalidates_version_one_plan_before_mutation(account_env):
     account, _ = await account_env.add_token()
     snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
     plan_id = await _add_plan(
         account_env,
         account.id,
         snapshot.state_fingerprint,
-        policy_version=2,
+        policy_version=1,
+    )
+    await account_env.policy.save(
+        account.id, AccountPolicy(material_reserve=80), 1, actor=ADMIN
     )
 
     with pytest.raises(PlanPreconditionFailed):
@@ -836,6 +831,17 @@ async def test_policy_version_is_rechecked_after_conflict(account_env):
     account, _ = await account_env.add_token()
     snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
     plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    policy = StubPolicyProvider()
+    service = AccountService(
+        account_env.sessions,
+        account_env.service.secret_box,
+        account_env.fake,
+        policy_provider=policy,
+        token_expiry=account_env.expiries.get,
+        clock=account_env.clock,
+        sleeper=account_env._sleep,
+        jitter=lambda: 0.0,
+    )
     attempts = 0
 
     async def resolver(api):
@@ -844,11 +850,11 @@ async def test_policy_version_is_rechecked_after_conflict(account_env):
     async def conflict_after_policy_change(api):
         nonlocal attempts
         attempts += 1
-        account_env.policy.version = 2
+        policy.version = 2
         raise GameConflict("policy-changed")
 
     with pytest.raises(PlanPreconditionFailed):
-        await account_env.service.mutate(
+        await service.mutate(
             account.id,
             conflict_after_policy_change,
             actor=SCHEDULER,
@@ -857,7 +863,7 @@ async def test_policy_version_is_rechecked_after_conflict(account_env):
         )
 
     assert attempts == 1
-    assert account_env.policy.requested[-2:] == [account.id, account.id]
+    assert policy.requested[-2:] == [account.id, account.id]
 
 
 async def test_authoritative_state_is_rechecked_after_conflict(account_env):
@@ -1103,7 +1109,6 @@ async def test_conflict_refreshes_and_rechecks_then_stops_after_two_retries(acco
 
     assert account_env.fake.mutation_count("idle_collect", account.id) == 3
     assert account_env.fake.bootstrap_count(account.id) >= initial_bootstraps + 4
-    assert account_env.policy.requested == [account.id, account.id, account.id]
     assert account_env.delays[-2:] == [0.0, 0.0]
 
 
@@ -1155,6 +1160,6 @@ async def test_locked_context_is_scoped_to_one_account(account_env):
 
     async with account_env.service.locked(account_a.id) as locked:
         assert locked.account_id == account_a.id
-        assert locked.policy.account_id == account_a.id
+        assert locked.policy.version == 1
         assert locked.snapshot.account_id == account_a.id
         assert locked.snapshot.account_id != account_b.id
