@@ -227,6 +227,25 @@ async def test_postgres_plan_store_rejects_corrupt_jsonb_on_fresh_account_filter
             await PostgresPlanStore(session).get_for_update(created.id, account_id)
 
 
+async def test_postgres_plan_store_rejects_corrupt_execution_result_on_fresh_reload(
+    plan_sessions,
+):
+    account_id = await _account_id(plan_sessions)
+    async with plan_sessions.begin() as session:
+        created = await PostgresPlanStore(session).create(_draft(account_id))
+        await session.execute(
+            text("UPDATE action_plans SET execution_result = CAST(:value AS jsonb) WHERE id = :id"),
+            {
+                "id": created.id,
+                "value": json.dumps({"status": "ok", "raw": {"secret": True}}),
+            },
+        )
+
+    async with plan_sessions.begin() as session:
+        with pytest.raises(ValidationError):
+            await PostgresPlanStore(session).get_for_update(created.id, account_id)
+
+
 async def test_postgres_plan_store_confirms_and_guards_runtime_terminal_arguments(plan_sessions):
     account_id = await _account_id(plan_sessions)
     async with plan_sessions.begin() as session:

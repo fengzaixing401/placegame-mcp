@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Literal, Protocol
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, TypeAdapter, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,8 @@ DecisionState = Literal["selected", "skipped", "blocked"]
 PlanState = Literal["pending", "confirmed", "executing", "executed", "failed", "reconciliation_required"]
 TerminalPlanState = Literal["executed", "failed", "reconciliation_required"]
 RiskClass = Literal["low", "medium", "high"]
+ExecutionResultValue = StrictStr | StrictBool | StrictInt
+ExecutionResult = dict[str, ExecutionResultValue]
 
 class EstimatedCosts(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -199,7 +201,7 @@ class TypedActionPlan(_PlanDetails):
     confirmed_by: str | None = None
     execution_state: PlanState = "pending"
     executed_at: datetime | None = None
-    execution_result: dict[str, object] | None = None
+    execution_result: ExecutionResult | None = None
 
     @property
     def family(self) -> ActionFamily:
@@ -212,6 +214,14 @@ class TypedActionPlan(_PlanDetails):
             raise ValueError("complete confirmation metadata is required")
         if self.execution_state == "confirmed" and self.confirmed_at is None:
             raise ValueError("confirmed plans require confirmation metadata")
+        if self.execution_result is not None:
+            if len(self.execution_result) > 16:
+                raise ValueError("execution result has too many fields")
+            for key, value in self.execution_result.items():
+                if len(key) > 64:
+                    raise ValueError("execution result key is too long")
+                if isinstance(value, str) and len(value) > 256:
+                    raise ValueError("execution result value is too long")
         return self
 
     def to_json(self) -> dict[str, object]:
