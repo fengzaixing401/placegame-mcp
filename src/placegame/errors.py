@@ -23,12 +23,6 @@ class InsufficientResource(GameError):
         self.metadata = metadata or {}
         super().__init__("insufficient resource")
 
-    @classmethod
-    def from_redacted_response(cls, response) -> "InsufficientResource":
-        from placegame.game.client import redact_response_metadata
-
-        return cls(redact_response_metadata(response))
-
 
 class GameConflict(GameError):
     def __init__(self, code: str | None = None) -> None:
@@ -59,3 +53,10 @@ class GameSchemaMismatch(GameError):
         self.operation = operation
         self.metadata = metadata
         super().__init__(f"unexpected response schema: {operation}")
+
+
+class GameHttpError(GameError):
+    def __init__(self, operation: str, metadata: dict[str, object]) -> None:
+        self.operation = operation
+        self.metadata = metadata
+        super().__init__(f"game HTTP error: {operation}")

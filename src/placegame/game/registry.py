@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Literal
+from types import MappingProxyType
+from typing import Literal, Mapping
 
 
 OperationName = Literal[
@@ -30,22 +31,30 @@ class EndpointSpec:
     mutation: bool
 
 
-REGISTRY: dict[OperationName, EndpointSpec] = {
-    "login": EndpointSpec("POST", "/api/auth/login", mutation=True),
-    "bootstrap": EndpointSpec("GET", "/api/client/bootstrap", mutation=False),
-    "catalog": EndpointSpec("GET", "/api/client/catalog", mutation=False),
-    "idle_summary": EndpointSpec("GET", "/api/client/idle-summary", mutation=False),
-    "view_sections": EndpointSpec("POST", "/api/client/view-sections", mutation=False),
-    "idle_collect": EndpointSpec("POST", "/api/battle/idle-collect", mutation=True),
-    "boss_preview": EndpointSpec("POST", "/api/boss/preview", mutation=False),
-    "boss_challenge": EndpointSpec("POST", "/api/boss/challenge", mutation=True),
-    "boss_assist": EndpointSpec("POST", "/api/boss/assist", mutation=True),
-    "profession_settle": EndpointSpec("POST", "/api/professions/settle", mutation=True),
-    "profession_enqueue": EndpointSpec("POST", "/api/professions/queue/enqueue", mutation=True),
-    "profession_supply_equip": EndpointSpec("POST", "/api/professions/supply/equip", mutation=True),
-    "daily_claim": EndpointSpec("POST", "/api/daily/claim", mutation=True),
-    "quest_claim": EndpointSpec("POST", "/api/quests/claim", mutation=True),
-    "achievement_claim": EndpointSpec("POST", "/api/achievements/claim", mutation=True),
-    "codex_claim": EndpointSpec("POST", "/api/codex/claim", mutation=True),
-    "mail_claim": EndpointSpec("POST", "/api/mail/claim", mutation=True),
-}
+REGISTRY: Mapping[OperationName, EndpointSpec] = MappingProxyType(
+    {
+        "login": EndpointSpec("POST", "/api/auth/login", mutation=True),
+        "bootstrap": EndpointSpec("GET", "/api/client/bootstrap", mutation=False),
+        "catalog": EndpointSpec("GET", "/api/client/catalog", mutation=False),
+        "idle_summary": EndpointSpec("GET", "/api/client/idle-summary", mutation=False),
+        "view_sections": EndpointSpec("POST", "/api/client/view-sections", mutation=False),
+        "idle_collect": EndpointSpec("POST", "/api/battle/idle-collect", mutation=True),
+        "boss_preview": EndpointSpec("POST", "/api/boss/preview", mutation=False),
+        "boss_challenge": EndpointSpec("POST", "/api/boss/challenge", mutation=True),
+        "boss_assist": EndpointSpec("POST", "/api/boss/assist", mutation=True),
+        "profession_settle": EndpointSpec("POST", "/api/professions/settle", mutation=True),
+        "profession_enqueue": EndpointSpec(
+            "POST", "/api/professions/queue/enqueue", mutation=True
+        ),
+        "profession_supply_equip": EndpointSpec(
+            "POST", "/api/professions/supply/equip", mutation=True
+        ),
+        "daily_claim": EndpointSpec("POST", "/api/daily/claim", mutation=True),
+        "quest_claim": EndpointSpec("POST", "/api/quests/claim", mutation=True),
+        "achievement_claim": EndpointSpec(
+            "POST", "/api/achievements/claim", mutation=True
+        ),
+        "codex_claim": EndpointSpec("POST", "/api/codex/claim", mutation=True),
+        "mail_claim": EndpointSpec("POST", "/api/mail/claim", mutation=True),
+    }
+)

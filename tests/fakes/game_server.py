@@ -3,7 +3,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 
@@ -19,6 +19,37 @@ class RecordedRequest:
 class RegisteredResponse:
     status_code: int
     body: Any
+    headers: Mapping[str, str]
+
+
+_CREDENTIAL_KEY_PARTS = (
+    "password",
+    "auth",
+    "token",
+    "secret",
+    "authorization",
+    "cookie",
+    "api-key",
+    "api_key",
+    "apikey",
+    "credential",
+)
+
+
+def _redact_credentials(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: "[REDACTED]"
+            if isinstance(key, str)
+            and any(part in key.lower() for part in _CREDENTIAL_KEY_PARTS)
+            else _redact_credentials(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_credentials(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_credentials(item) for item in value)
+    return value
 
 
 class FakeGameServer:
@@ -27,8 +58,7 @@ class FakeGameServer:
         self._routes: dict[tuple[str, str], RegisteredResponse] = {}
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
-        self.fail_next_reads = 0
-        self.timeout_next_mutation = False
+        self._timeouts: dict[tuple[str, str], int] = {}
         self.timeout_delay_seconds = 0.2
 
     @property
@@ -39,11 +69,26 @@ class FakeGameServer:
         return f"http://{host}:{port}"
 
     def register(
-        self, method: str, path: str, body: Any, *, status_code: int = 200
+        self,
+        method: str,
+        path: str,
+        body: Any,
+        *,
+        status_code: int = 200,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         if not path.startswith("/api/"):
             raise ValueError("fake game routes must be registered under /api/")
-        self._routes[(method.upper(), path)] = RegisteredResponse(status_code, body)
+        self._routes[(method.upper(), path)] = RegisteredResponse(
+            status_code, body, dict(headers or {})
+        )
+
+    def timeout(self, method: str, path: str, *, count: int = 1) -> None:
+        if not path.startswith("/api/"):
+            raise ValueError("fake game timeout paths must be under /api/")
+        if count < 1:
+            raise ValueError("fake game timeout count must be positive")
+        self._timeouts[(method.upper(), path)] = count
 
     def __enter__(self) -> "FakeGameServer":
         fake = self
@@ -70,36 +115,45 @@ class FakeGameServer:
                 except json.JSONDecodeError:
                     json_body = None
 
-                recorded_headers = {
-                    key.lower(): "[REDACTED]" if key.lower() == "authorization" else value
-                    for key, value in self.headers.items()
-                }
+                recorded_headers = _redact_credentials(
+                    {key.lower(): value for key, value in self.headers.items()}
+                )
                 fake.requests.append(
-                    RecordedRequest(self.command, path, recorded_headers, json_body)
+                    RecordedRequest(
+                        self.command,
+                        path,
+                        recorded_headers,
+                        _redact_credentials(json_body),
+                    )
                 )
 
-                is_read = self.command == "GET"
-                should_timeout = (is_read and fake.fail_next_reads > 0) or (
-                    not is_read and fake.timeout_next_mutation
-                )
-                if should_timeout:
-                    if is_read:
-                        fake.fail_next_reads -= 1
+                route = (self.command, path)
+                remaining_timeouts = fake._timeouts.get(route, 0)
+                if remaining_timeouts:
+                    if remaining_timeouts == 1:
+                        del fake._timeouts[route]
                     else:
-                        fake.timeout_next_mutation = False
+                        fake._timeouts[route] = remaining_timeouts - 1
                     time.sleep(fake.timeout_delay_seconds)
 
-                response = fake._routes.get((self.command, path))
+                response = fake._routes.get(route)
                 if response is None:
                     self._send_json(404, {"detail": "not found"})
                     return
-                self._send_json(response.status_code, response.body)
+                self._send_json(response.status_code, response.body, response.headers)
 
-            def _send_json(self, status_code: int, body: Any) -> None:
+            def _send_json(
+                self,
+                status_code: int,
+                body: Any,
+                headers: Mapping[str, str] | None = None,
+            ) -> None:
                 encoded = json.dumps(body).encode("utf-8")
                 self.send_response(status_code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(encoded)))
+                for key, value in (headers or {}).items():
+                    self.send_header(key, value)
                 self.end_headers()
                 try:
                     self.wfile.write(encoded)

@@ -66,58 +66,64 @@ class MailClaimRequest(RequestModel):
 
 
 class ResponseData(BaseModel):
-    """A validated JSON object while endpoint-specific fields evolve independently."""
+    """The required stable core of an endpoint response."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(
+        extra="allow", populate_by_name=True, strict=True
+    )
 
 
 class LoginResult(ResponseData):
-    pass
+    token: str = Field(min_length=1)
 
 
 class BootstrapState(ResponseData):
-    pass
+    account_id: str = Field(alias="accountId", min_length=1)
 
 
 class Catalog(ResponseData):
-    pass
+    combat_balance_version: str = Field(alias="combatBalanceVersion", min_length=1)
 
 
 class IdleSummary(ResponseData):
-    pass
+    accumulated_seconds: int = Field(alias="accumulatedSeconds", ge=0)
+    capacity_seconds: int = Field(alias="capacitySeconds", gt=0)
 
 
 class ViewSections(ResponseData):
-    pass
+    sections: dict[str, object]
 
 
 class IdleCollectResult(ResponseData):
-    pass
+    collected: bool
 
 
 class BossPreview(ResponseData):
-    pass
+    predicted_win: bool = Field(alias="predictedWin")
+    chance: float = Field(ge=0, le=100)
 
 
 class BossChallengeResult(ResponseData):
-    pass
+    won: bool
 
 
 class BossAssistResult(ResponseData):
-    pass
+    my_attempt_count: int = Field(alias="myAttemptCount", ge=0)
+    remaining_attempt_count: int = Field(alias="remainingAttemptCount", ge=0)
 
 
 class ProfessionSettleResult(ResponseData):
-    pass
+    selected_profession_key: str = Field(alias="selectedProfessionKey", min_length=1)
+    queue_size: int = Field(alias="queueSize", ge=0)
 
 
 class ProfessionQueueResult(ResponseData):
-    pass
+    queue_size: int = Field(alias="queueSize", ge=0)
 
 
 class ProfessionSupplyResult(ResponseData):
-    pass
+    equipped: bool
 
 
 class RewardClaimResult(ResponseData):
-    pass
+    claimed: bool
