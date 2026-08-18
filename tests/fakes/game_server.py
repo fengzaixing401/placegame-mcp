@@ -23,6 +23,7 @@ from placegame.game.schemas import (
     BossChallengeResult,
     BossPreview,
     BossPreviewRequest,
+    BossState,
     BootstrapState,
     Catalog,
     IdleCollectResult,
@@ -31,8 +32,11 @@ from placegame.game.schemas import (
     ProfessionQueueResult,
     ProfessionSettleResult,
     ProfessionSupplyResult,
+    ProfessionState,
     RewardClaimResult,
+    RewardState,
     ViewSections,
+    WorldBossState,
 )
 
 
@@ -220,6 +224,10 @@ class _FakeAccountState:
     managed_id: UUID | None = None
     accumulated_seconds: int = 3600
     capacity_seconds: int = 43200
+    boss_state: BossState | None = None
+    world_boss_state: WorldBossState | None = None
+    profession_state: ProfessionState | None = None
+    reward_state: RewardState | None = None
 
     @property
     def runtime_id(self) -> UUID:
@@ -242,6 +250,11 @@ class FakeGameApiFactory:
         self._bootstrap_failures: dict[UUID, tuple[int, GameError]] = {}
         self._idle_summary_counts: dict[UUID, int] = {}
         self._idle_summary_failures: dict[UUID, int] = {}
+        self._typed_read_counts: dict[tuple[UUID, str], int] = {}
+        self.preview_count = 0
+        self.assist_calls: list[str] = []
+        self.profession_supply_equip_calls: list[tuple[str, str]] = []
+        self.claim_calls: list[str] = []
         self._bootstrap_barriers: dict[str, BootstrapBarrier] = {}
         self.login_count = 0
 
@@ -289,6 +302,21 @@ class FakeGameApiFactory:
 
     def set_idle_seconds(self, account_id: UUID, seconds: int) -> None:
         self._states_by_id[account_id].accumulated_seconds = seconds
+
+    def set_boss_state(self, account_id: UUID, state: BossState) -> None:
+        self._states_by_id[account_id].boss_state = state
+
+    def set_world_boss_state(self, account_id: UUID, state: WorldBossState) -> None:
+        self._states_by_id[account_id].world_boss_state = state
+
+    def set_profession_state(self, account_id: UUID, state: ProfessionState) -> None:
+        self._states_by_id[account_id].profession_state = state
+
+    def set_reward_state(self, account_id: UUID, state: RewardState) -> None:
+        self._states_by_id[account_id].reward_state = state
+
+    def typed_read_count(self, operation: str, account_id: UUID) -> int:
+        return self._typed_read_counts.get((account_id, operation), 0)
 
     def fail_bootstrap(
         self,
@@ -394,6 +422,30 @@ class _FakeGameApi:
             capacitySeconds=state.capacity_seconds,
         )
 
+    def _typed_state[T](self, operation: str, state: T | None) -> T:
+        account = self._factory._state_for_token(self._session_token)
+        key = (account.runtime_id, operation)
+        self._factory._typed_read_counts[key] = self._factory._typed_read_counts.get(key, 0) + 1
+        if state is None:
+            raise GameSchemaMismatch("view_sections", {"status_code": 200})
+        return state
+
+    async def boss_state(self) -> BossState:
+        state = self._factory._state_for_token(self._session_token)
+        return self._typed_state("boss_state", state.boss_state)
+
+    async def world_boss_state(self) -> WorldBossState:
+        state = self._factory._state_for_token(self._session_token)
+        return self._typed_state("world_boss_state", state.world_boss_state)
+
+    async def profession_state(self) -> ProfessionState:
+        state = self._factory._state_for_token(self._session_token)
+        return self._typed_state("profession_state", state.profession_state)
+
+    async def reward_state(self) -> RewardState:
+        state = self._factory._state_for_token(self._session_token)
+        return self._typed_state("reward_state", state.reward_state)
+
     async def catalog(self) -> Catalog:
         raise NotImplementedError("catalog is not needed by the account fake")
 
@@ -419,6 +471,7 @@ class _FakeGameApi:
         return IdleCollectResult(collected=True)
 
     async def boss_preview(self, request: BossPreviewRequest) -> BossPreview:
+        self._factory.preview_count += 1
         raise NotImplementedError("boss preview is not needed by the account fake")
 
     async def boss_challenge(
@@ -427,6 +480,7 @@ class _FakeGameApi:
         raise NotImplementedError("boss challenge is not needed by the account fake")
 
     async def boss_assist(self, boss_key: str) -> BossAssistResult:
+        self._factory.assist_calls.append(boss_key)
         raise NotImplementedError("boss assist is not needed by the account fake")
 
     async def profession_settle(self) -> ProfessionSettleResult:
@@ -440,6 +494,7 @@ class _FakeGameApi:
     async def profession_supply_equip(
         self, supply_type: str, item_key: str
     ) -> ProfessionSupplyResult:
+        self._factory.profession_supply_equip_calls.append((supply_type, item_key))
         raise NotImplementedError("profession supplies are not needed by the account fake")
 
     async def daily_claim(self, point: int) -> RewardClaimResult:

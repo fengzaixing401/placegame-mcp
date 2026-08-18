@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -126,6 +128,10 @@ class BossSectionEntry(ResponseData):
 class ViewSections(ResponseData):
     section_etags: dict[str, str] = Field(alias="sectionEtags")
     bosses: list[BossSectionEntry] | None = None
+    boss_state: BossState | None = Field(alias="bossState", default=None)
+    world_boss_state: WorldBossState | None = Field(alias="worldBossState", default=None)
+    profession_state: ProfessionState | None = Field(alias="professionState", default=None)
+    reward_state: RewardState | None = Field(alias="rewardState", default=None)
 
 
 class IdleCollectResult(ResponseData):
@@ -167,3 +173,94 @@ class ProfessionSupplyResult(ResponseData):
 
 class RewardClaimResult(ResponseData):
     claimed: bool
+
+
+class BossEntryState(ResponseData):
+    key: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+    required_level: int = Field(alias="requiredLevel", ge=0)
+    attempts: int | None = Field(alias="attempts", default=None, ge=0)
+    blocked_reason: str | None = Field(alias="blockedReason", default=None)
+    refresh_key: str | None = Field(alias="refreshKey", default=None)
+    difficulty_options: list[Literal["normal", "hard", "nightmare"]] = Field(
+        alias="difficultyOptions", min_length=1
+    )
+
+
+class EquipmentSlot(ResponseData):
+    key: str = Field(min_length=1)
+    score: int = Field(ge=0)
+    eligible: bool
+
+
+class PotionState(ResponseData):
+    active_key: str | None = Field(alias="activeKey", default=None)
+    required_key: str | None = Field(alias="requiredKey", default=None)
+
+
+class BossAffix(ResponseData):
+    key: str = Field(min_length=1)
+    multiplier: float = Field(gt=0)
+
+
+class BossState(ResponseData):
+    entries: list[BossEntryState] = Field(min_length=1)
+    free_attempts: int = Field(alias="freeAttempts", ge=0)
+    material_balance: int = Field(alias="materialBalance", ge=0)
+    equipment: list[EquipmentSlot] = Field(min_length=1)
+    potion: PotionState
+    affixes: list[BossAffix]
+
+
+class WorldBossInstance(ResponseData):
+    key: str = Field(min_length=1)
+    lifecycle: str = Field(min_length=1)
+    active: bool
+    alive: bool
+    my_attempt_count: int = Field(alias="myAttemptCount", ge=0)
+    remaining_attempt_count: int = Field(alias="remainingAttemptCount", ge=0)
+
+
+class WorldBossState(ResponseData):
+    instances: list[WorldBossInstance] = Field(min_length=1)
+
+
+class ProfessionQueueEntry(ResponseData):
+    action_key: str = Field(alias="actionKey", min_length=1)
+    remaining_seconds: int = Field(alias="remainingSeconds", ge=0)
+
+
+class ProfessionRecipe(ResponseData):
+    key: str = Field(min_length=1)
+    duration_seconds: int = Field(alias="durationSeconds", gt=0)
+    output_key: str = Field(alias="outputKey", min_length=1)
+    output_count: int = Field(alias="outputCount", gt=0)
+    required_inputs: dict[str, int] = Field(alias="requiredInputs")
+    unlock_milestone: bool = Field(alias="unlockMilestone", default=False)
+
+
+class ProfessionState(ResponseData):
+    selected_profession_key: str = Field(alias="selectedProfessionKey", min_length=1)
+    queue: list[ProfessionQueueEntry]
+    unlock_progress: int = Field(alias="unlockProgress", ge=0)
+    recipes: list[ProfessionRecipe] = Field(min_length=1)
+    balances: dict[str, int]
+    recipe_version: str = Field(alias="recipeVersion", min_length=1)
+
+
+class RewardCandidate(ResponseData):
+    kind: str = Field(min_length=1)
+    identifier: str = Field(min_length=1)
+    completed: bool
+    claimed: bool
+    choice_count: int = Field(alias="choiceCount", ge=0)
+    cost: int = Field(ge=0)
+    would_overflow: bool = Field(alias="wouldOverflow")
+
+
+class RewardState(ResponseData):
+    inventory_safety_available: bool = Field(alias="inventorySafetyAvailable")
+    candidates: list[RewardCandidate]
+
+
+ViewSections.model_rebuild()

@@ -31,6 +31,7 @@ from .schemas import (
     BossAssistResult,
     BossChallengeRequest,
     BossChallengeResult,
+    BossState,
     BossPreview,
     BossPreviewRequest,
     BootstrapState,
@@ -47,10 +48,13 @@ from .schemas import (
     ProfessionSettleResult,
     ProfessionSupplyEquipRequest,
     ProfessionSupplyResult,
+    ProfessionState,
     QuestClaimRequest,
     RewardClaimResult,
+    RewardState,
     ViewSections,
     ViewSectionsRequest,
+    WorldBossState,
 )
 
 
@@ -79,6 +83,10 @@ class GameApi(Protocol):
         sections: tuple[ViewSection, ...],
         section_etags: dict[ViewSection, str] | None = None,
     ) -> ViewSections: ...
+    async def boss_state(self) -> BossState: ...
+    async def world_boss_state(self) -> WorldBossState: ...
+    async def profession_state(self) -> ProfessionState: ...
+    async def reward_state(self) -> RewardState: ...
     async def idle_collect(self) -> IdleCollectResult: ...
     async def boss_preview(self, request: BossPreviewRequest) -> BossPreview: ...
     async def boss_challenge(
@@ -369,6 +377,30 @@ class HttpGameClient:
         if "bosses" in sections and result.bosses is None:
             raise GameSchemaMismatch("view_sections", {"status_code": 200})
         return result
+
+    async def boss_state(self) -> BossState:
+        state = (await self.view_sections(("bosses",))).boss_state
+        if state is None:
+            raise GameSchemaMismatch("view_sections", {"status_code": 200})
+        return state
+
+    async def world_boss_state(self) -> WorldBossState:
+        state = (await self.view_sections(("bosses",))).world_boss_state
+        if state is None:
+            raise GameSchemaMismatch("view_sections", {"status_code": 200})
+        return state
+
+    async def profession_state(self) -> ProfessionState:
+        state = (await self.view_sections(("professions",))).profession_state
+        if state is None:
+            raise GameSchemaMismatch("view_sections", {"status_code": 200})
+        return state
+
+    async def reward_state(self) -> RewardState:
+        state = (await self.view_sections(("rewards",))).reward_state
+        if state is None:
+            raise GameSchemaMismatch("view_sections", {"status_code": 200})
+        return state
 
     async def idle_collect(self) -> IdleCollectResult:
         return await self._request("idle_collect", IdleCollectResult)
