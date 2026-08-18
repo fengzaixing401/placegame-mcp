@@ -77,3 +77,12 @@ acceptance criteria, and verification gate. Each implementation handoff must
 identify the commit or diff, commands run, and unresolved concerns. Each review
 must end with either `Approved` or a finite fix list; it must not restart the
 planning process without a concrete architectural conflict.
+
+## Default Decision Policy
+
+When work presents multiple valid, non-destructive options, select the
+recommended option and continue without asking the user to choose. Resolve
+ordinary implementation details using the approved plan, existing repository
+patterns, and the simplest sufficient solution. Ask the user only when work
+requires new authority, risks irreversible data loss, or depends on external
+information that cannot be inferred or safely substituted.
