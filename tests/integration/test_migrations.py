@@ -102,6 +102,31 @@ async def test_game_account_secrets_are_record_bound_and_persist_as_binary_frame
     ) == "password"
 
 
+async def test_game_account_identity_is_unique_when_present(migrated_engine):
+    session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
+    identity = f"game-{uuid4()}"
+
+    async with session_factory() as session:
+        session.add(
+            GameAccount(
+                label="first identity",
+                auth_mode="token_only",
+                game_account_id=identity,
+            )
+        )
+        await session.commit()
+
+        session.add(
+            GameAccount(
+                label="duplicate identity",
+                auth_mode="token_only",
+                game_account_id=identity,
+            )
+        )
+        with pytest.raises(DBAPIError):
+            await session.commit()
+
+
 async def test_game_account_rejects_raw_frames_and_detects_aad_copying(migrated_engine, secret_box):
     source = GameAccount(label="source", auth_mode="password")
     source.set_password("password", secret_box)

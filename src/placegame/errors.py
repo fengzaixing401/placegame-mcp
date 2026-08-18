@@ -15,6 +15,13 @@ class AccountNotFound(AccountError):
         super().__init__("account not found")
 
 
+class AccountIdentityConflict(AccountError):
+    """The authoritative game account identity does not match this record."""
+
+    def __init__(self) -> None:
+        super().__init__("account identity conflict")
+
+
 class AccountDisabled(AccountError):
     def __init__(self) -> None:
         super().__init__("account disabled")

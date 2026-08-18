@@ -20,9 +20,13 @@ class Base(DeclarativeBase):
 
 class GameAccount(Base):
     __tablename__ = "game_accounts"
-    __table_args__ = (CheckConstraint("policy_version >= 1", name="ck_game_accounts_policy_version"),)
+    __table_args__ = (
+        CheckConstraint("policy_version >= 1", name="ck_game_accounts_policy_version"),
+        UniqueConstraint("game_account_id", name="uq_game_accounts_game_account_id"),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    game_account_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     label: Mapped[str] = mapped_column(String(120), nullable=False)
     _game_username: Mapped[EncryptedSecret | None] = mapped_column(
         "game_username", EncryptedSecretFrame(), nullable=True

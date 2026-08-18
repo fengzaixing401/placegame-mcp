@@ -7,7 +7,14 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from placegame.errors import AmbiguousMutation, GameConflict, SessionRejected
+from placegame.errors import (
+    AmbiguousMutation,
+    GameConflict,
+    GameError,
+    GameSchemaMismatch,
+    GameUnavailable,
+    SessionRejected,
+)
 from placegame.game.client import GameApi
 from placegame.game.schemas import (
     BossAssistResult,
@@ -203,8 +210,13 @@ class _FakeAccountState:
     username: str | None
     password: str | None
     token: str
+    managed_id: UUID | None = None
     accumulated_seconds: int = 3600
     capacity_seconds: int = 43200
+
+    @property
+    def runtime_id(self) -> UUID:
+        return self.managed_id or self.account_id
 
 
 class FakeGameApiFactory:
@@ -214,11 +226,13 @@ class FakeGameApiFactory:
         self._states_by_id: dict[UUID, _FakeAccountState] = {}
         self._states_by_token: dict[str, _FakeAccountState] = {}
         self._rejected_passwords: set[str] = set()
+        self._login_redirects: dict[str, str] = {}
         self._rejected_accounts: set[UUID] = set()
         self._ambiguous: set[tuple[UUID, str]] = set()
         self._conflicts: dict[tuple[UUID, str], int] = {}
         self._mutation_counts: dict[tuple[UUID, str], int] = {}
         self._bootstrap_counts: dict[UUID, int] = {}
+        self._bootstrap_failures: dict[UUID, tuple[int, GameError]] = {}
         self.login_count = 0
 
     def register_credentials(
@@ -235,7 +249,7 @@ class FakeGameApiFactory:
 
     def bind_account_id(self, registered_id: UUID, managed_id: UUID) -> None:
         state = self._states_by_id.pop(registered_id)
-        state.account_id = managed_id
+        state.managed_id = managed_id
         self._states_by_id[managed_id] = state
         if registered_id in self._bootstrap_counts:
             self._bootstrap_counts[managed_id] = self._bootstrap_counts.pop(registered_id)
@@ -243,11 +257,40 @@ class FakeGameApiFactory:
     def reject_login(self, password: str) -> None:
         self._rejected_passwords.add(password)
 
+    def redirect_login(self, password: str, session_token: str) -> None:
+        self._login_redirects[password] = session_token
+
+    def redirect_token(self, session_token: str, target_token: str) -> None:
+        self._states_by_token[session_token] = self._states_by_token[target_token]
+
     def reject_account_session(self, account_id: UUID) -> None:
         self._rejected_accounts.add(account_id)
 
     def allow_account_session(self, account_id: UUID) -> None:
         self._rejected_accounts.discard(account_id)
+
+    def set_idle_seconds(self, account_id: UUID, seconds: int) -> None:
+        self._states_by_id[account_id].accumulated_seconds = seconds
+
+    def fail_bootstrap(
+        self,
+        account_id: UUID,
+        error: str = "unavailable",
+        *,
+        after_successes: int = 1,
+    ) -> None:
+        if error == "schema":
+            failure: GameError = GameSchemaMismatch(
+                "bootstrap", {"status_code": 200}
+            )
+        elif error == "session":
+            failure = SessionRejected()
+        else:
+            failure = GameUnavailable("bootstrap")
+        self._bootstrap_failures[account_id] = (
+            self._bootstrap_counts.get(account_id, 0) + after_successes,
+            failure,
+        )
 
     def commit_then_timeout(self, operation: str, account_id: UUID) -> None:
         self._ambiguous.add((account_id, operation))
@@ -272,7 +315,7 @@ class FakeGameApiFactory:
 
     def _state_for_token(self, token: str | None) -> _FakeAccountState:
         state = self._states_by_token.get(token or "")
-        if state is None or state.account_id in self._rejected_accounts:
+        if state is None or state.runtime_id in self._rejected_accounts:
             raise SessionRejected()
         return state
 
@@ -286,16 +329,24 @@ class _FakeGameApi:
         self._factory.login_count += 1
         if password in self._factory._rejected_passwords:
             raise SessionRejected()
+        redirected_token = self._factory._login_redirects.get(password)
+        if redirected_token is not None:
+            state = self._factory._states_by_token[redirected_token]
+            self._factory.allow_account_session(state.runtime_id)
+            return LoginResult(token=redirected_token)
         for state in self._factory._states_by_id.values():
             if state.username == username and state.password == password:
-                self._factory.allow_account_session(state.account_id)
+                self._factory.allow_account_session(state.runtime_id)
                 return LoginResult(token=state.token)
         raise SessionRejected()
 
     async def bootstrap(self) -> BootstrapState:
         state = self._factory._state_for_token(self._session_token)
-        self._factory._bootstrap_counts[state.account_id] = (
-            self._factory._bootstrap_counts.get(state.account_id, 0) + 1
+        failure = self._factory._bootstrap_failures.get(state.runtime_id)
+        if failure is not None and self._factory._bootstrap_counts.get(state.runtime_id, 0) >= failure[0]:
+            raise failure[1]
+        self._factory._bootstrap_counts[state.runtime_id] = (
+            self._factory._bootstrap_counts.get(state.runtime_id, 0) + 1
         )
         return BootstrapState(accountId=str(state.account_id))
 
@@ -318,7 +369,7 @@ class _FakeGameApi:
 
     async def idle_collect(self) -> IdleCollectResult:
         state = self._factory._state_for_token(self._session_token)
-        key = (state.account_id, "idle_collect")
+        key = (state.runtime_id, "idle_collect")
         self._factory._mutation_counts[key] = self._factory._mutation_counts.get(key, 0) + 1
         remaining_conflicts = self._factory._conflicts.get(key, 0)
         if remaining_conflicts:

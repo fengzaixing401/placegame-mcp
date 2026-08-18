@@ -22,14 +22,18 @@ from placegame.accounts.service import (
 from placegame.contracts import Actor
 from placegame.errors import (
     AccountDisabled,
+    AccountIdentityConflict,
+    AccountNotFound,
     AccountPaused,
     AuthenticationRequired,
     GameConflict,
+    GameSchemaMismatch,
+    GameUnavailable,
     PlanPreconditionFailed,
     PolicyUnavailable,
     ReconciliationRequired,
 )
-from placegame.models import AuditEvent, GameAccount, Job
+from placegame.models import ActionPlan, AuditEvent, GameAccount, Job
 from tests.fakes.game_server import FakeGameApiFactory
 
 
@@ -50,10 +54,11 @@ class StubPolicy:
 class StubPolicyProvider:
     def __init__(self) -> None:
         self.requested: list[UUID] = []
+        self.version = 1
 
     async def get(self, account_id: UUID) -> VersionedPolicy:
         self.requested.append(account_id)
-        return StubPolicy(account_id)
+        return StubPolicy(account_id, self.version)
 
 
 @dataclass
@@ -145,6 +150,29 @@ async def account_env(account_database_url, secret_box):
         await engine.dispose()
 
 
+async def _add_plan(
+    environment: ServiceEnvironment,
+    account_id: UUID,
+    state_fingerprint: str,
+    *,
+    policy_version: int = 1,
+) -> UUID:
+    async with environment.sessions.begin() as session:
+        plan = ActionPlan(
+            account_id=account_id,
+            state_fingerprint=state_fingerprint,
+            policy_version=policy_version,
+            proposed_actions=[{"kind": "idle_collect"}],
+            estimated_costs={},
+            risk="low",
+            expires_at=environment.clock() + timedelta(minutes=5),
+            confirmation_required=False,
+        )
+        session.add(plan)
+        await session.flush()
+        return plan.id
+
+
 def _jwt(exp: object) -> str:
     def encode(value: object) -> str:
         raw = json.dumps(value, separators=(",", ":")).encode()
@@ -186,6 +214,144 @@ async def test_added_accounts_are_verified_sanitized_and_opaque_tokens_stay_none
     assert not hasattr(credential_account, "password")
     assert account_env.fake.bootstrap_count(token_account.id) == 1
     assert account_env.fake.bootstrap_count(credential_account.id) == 1
+
+
+async def test_duplicate_game_identity_cannot_be_enrolled_twice(account_env):
+    registered_id = uuid4()
+    token = f"duplicate-token-{registered_id.hex}"
+    account_env.fake.register_token(registered_id, token)
+    account_env.expiries[token] = None
+
+    first = await account_env.service.add_token_only("first", token, actor=ADMIN)
+    account_env.fake.bind_account_id(registered_id, first.id)
+
+    with pytest.raises(AccountIdentityConflict):
+        await account_env.service.add_token_only("duplicate", token, actor=ADMIN)
+
+    async with account_env.sessions() as session:
+        records = (await session.scalars(select(GameAccount))).all()
+        audits = (
+            await session.scalars(
+                select(AuditEvent).where(AuditEvent.account_id == first.id)
+            )
+        ).all()
+    assert len(records) == 1
+    assert records[0].game_account_id == str(registered_id)
+    assert any(row.action == "account.identity.conflict" for row in audits)
+
+
+async def test_cross_account_token_update_is_rejected(account_env):
+    account_a, token_a = await account_env.add_token("a")
+    account_b, token_b = await account_env.add_token("b")
+    async with account_env.sessions() as session:
+        before = (await session.get(GameAccount, account_a.id))._session_token
+
+    with pytest.raises(AccountIdentityConflict):
+        await account_env.service.update_token_only(account_a.id, token_b, actor=ADMIN)
+
+    async with account_env.sessions() as session:
+        after = (await session.get(GameAccount, account_a.id))._session_token
+    assert after == before
+    assert account_env.fake.mutation_count("idle_collect", account_b.id) == 0
+    assert (await account_env.service.get(account_a.id)).paused_reason == "account_identity_mismatch"
+    with pytest.raises(AccountDisabled):
+        await account_env.service.mutate(
+            account_a.id, lambda api: api.idle_collect(), actor=SCHEDULER
+        )
+    assert account_env.fake.mutation_count("idle_collect", account_a.id) == 0
+    assert token_a != token_b
+
+
+async def test_cross_account_credential_update_is_rejected(account_env):
+    account_a, _, _, _ = await account_env.add_credentials("a")
+    account_b, username_b, password_b, _ = await account_env.add_credentials("b")
+    async with account_env.sessions() as session:
+        before = (await session.get(GameAccount, account_a.id))._password
+
+    with pytest.raises(AccountIdentityConflict):
+        await account_env.service.update_credentials(
+            account_a.id, username_b, password_b, actor=ADMIN
+        )
+
+    async with account_env.sessions() as session:
+        after = (await session.get(GameAccount, account_a.id))._password
+    assert after == before
+    assert (await account_env.service.get(account_a.id)).paused_reason == "account_identity_mismatch"
+    with pytest.raises(AccountDisabled):
+        await account_env.service.mutate(
+            account_a.id, lambda api: api.idle_collect(), actor=SCHEDULER
+        )
+    assert account_env.fake.mutation_count("idle_collect", account_a.id) == 0
+    assert account_env.fake.mutation_count("idle_collect", account_b.id) == 0
+
+
+async def test_credential_renewal_cannot_switch_game_identity(account_env):
+    account_a, _, password_a, token_a = await account_env.add_credentials(
+        "a", expires_at=account_env.clock() + timedelta(days=7)
+    )
+    account_b, token_b = await account_env.add_token("b")
+    account_env.fake.redirect_login(password_a, token_b)
+    async with account_env.sessions.begin() as session:
+        record = await session.get(GameAccount, account_a.id)
+        record.session_expires_at = account_env.clock() + timedelta(hours=23)
+        before = record._session_token
+
+    state = await account_env.service.ensure_session(account_a.id, actor=SCHEDULER)
+
+    async with account_env.sessions() as session:
+        record = await session.get(GameAccount, account_a.id)
+    assert state.authenticated is False
+    assert state.paused_reason == "account_identity_mismatch"
+    assert record._session_token == before
+    assert record.get_session_token(account_env.service.secret_box) == token_a
+    assert (await account_env.service.get(account_b.id)).paused_reason is None
+
+
+async def test_stored_token_bootstrap_cannot_switch_game_identity(account_env):
+    account_a, token_a = await account_env.add_token("a")
+    account_b, token_b = await account_env.add_token("b")
+    async with account_env.sessions() as session:
+        before = (await session.get(GameAccount, account_a.id))._session_token
+    account_env.fake.redirect_token(token_a, token_b)
+
+    state = await account_env.service.ensure_session(account_a.id, actor=SCHEDULER)
+
+    async with account_env.sessions() as session:
+        record = await session.get(GameAccount, account_a.id)
+    assert state.authenticated is False
+    assert state.paused_reason == "account_identity_mismatch"
+    assert record._session_token == before
+    assert (await account_env.service.get(account_b.id)).paused_reason is None
+
+
+async def test_token_enrollment_preserves_game_unavailability(account_env):
+    registered_id = uuid4()
+    token = f"unavailable-token-{registered_id.hex}"
+    account_env.fake.register_token(registered_id, token)
+    account_env.fake.fail_bootstrap(registered_id, after_successes=0)
+
+    with pytest.raises(GameUnavailable):
+        await account_env.service.add_token_only("unavailable", token, actor=ADMIN)
+
+
+async def test_credential_renewal_unavailability_does_not_count_as_auth_failure(
+    account_env,
+):
+    account, _, _, _ = await account_env.add_credentials(
+        expires_at=account_env.clock() + timedelta(days=7)
+    )
+    async with account_env.sessions.begin() as session:
+        record = await session.get(GameAccount, account.id)
+        record.session_expires_at = account_env.clock() + timedelta(hours=23)
+    account_env.fake.fail_bootstrap(account.id, after_successes=0)
+
+    with pytest.raises(GameUnavailable):
+        await account_env.service.ensure_session(account.id, actor=SCHEDULER)
+
+    async with account_env.sessions() as session:
+        record = await session.get(GameAccount, account.id)
+    assert record.auth_failure_count == 0
+    assert record.paused_reason is None
 
 
 @pytest.mark.parametrize("label", ["", "   ", "x" * 121])
@@ -451,6 +617,92 @@ async def test_invalid_plan_uses_stable_error_and_safe_audit_reference(account_e
     assert account_env.fake.mutation_count("idle_collect", account.id) == 0
 
 
+async def test_stale_policy_version_rejects_plan_before_mutation(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(
+        account_env,
+        account.id,
+        snapshot.state_fingerprint,
+        policy_version=2,
+    )
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+        )
+
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_stale_state_fingerprint_rejects_plan_before_mutation(account_env):
+    account, _ = await account_env.add_token()
+    plan_id = await _add_plan(account_env, account.id, "stale-state")
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+        )
+
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_policy_version_is_rechecked_after_conflict(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    attempts = 0
+
+    async def conflict_after_policy_change(api):
+        nonlocal attempts
+        attempts += 1
+        account_env.policy.version = 2
+        raise GameConflict("policy-changed")
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            conflict_after_policy_change,
+            actor=SCHEDULER,
+            plan_id=plan_id,
+        )
+
+    assert attempts == 1
+    assert account_env.policy.requested[-2:] == [account.id, account.id]
+
+
+async def test_authoritative_state_is_rechecked_after_conflict(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    attempts = 0
+
+    async def conflict_after_state_change(api):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            account_env.fake.set_idle_seconds(account.id, 120)
+            raise GameConflict("state-changed")
+        return await api.idle_collect()
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            conflict_after_state_change,
+            actor=SCHEDULER,
+            plan_id=plan_id,
+        )
+
+    assert attempts == 1
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
 async def test_normal_response_is_passed_to_verifier(account_env):
     account, _ = await account_env.add_token()
     seen = []
@@ -470,6 +722,106 @@ async def test_normal_response_is_passed_to_verifier(account_env):
     assert outcome.result is not None
     assert outcome.applied is True
     assert outcome.reconciled is False
+
+
+async def test_commit_then_bootstrap_failure_requires_reconciliation_without_repeat(account_env):
+    account, _ = await account_env.add_token()
+    account_env.fake.fail_bootstrap(account.id)
+
+    with pytest.raises(ReconciliationRequired):
+        await account_env.service.mutate(
+            account.id, lambda api: api.idle_collect(), actor=SCHEDULER
+        )
+
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
+async def test_post_commit_session_rejection_requires_reconciliation_without_repeat(
+    account_env,
+):
+    account, _ = await account_env.add_token()
+    account_env.fake.fail_bootstrap(account.id, error="session")
+
+    with pytest.raises(ReconciliationRequired):
+        await account_env.service.mutate(
+            account.id, lambda api: api.idle_collect(), actor=SCHEDULER
+        )
+
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
+async def test_post_commit_schema_mismatch_stops_without_repeat(account_env):
+    account, _ = await account_env.add_token()
+
+    async def malformed_success(api):
+        await api.idle_collect()
+        raise GameSchemaMismatch("idle_collect", {"status_code": 200})
+
+    with pytest.raises(GameSchemaMismatch):
+        await account_env.service.mutate(
+            account.id, malformed_success, actor=SCHEDULER
+        )
+
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
+async def test_post_commit_bootstrap_schema_mismatch_stops_without_repeat(account_env):
+    account, _ = await account_env.add_token()
+    account_env.fake.fail_bootstrap(account.id, error="schema")
+
+    with pytest.raises(GameSchemaMismatch):
+        await account_env.service.mutate(
+            account.id, lambda api: api.idle_collect(), actor=SCHEDULER
+        )
+
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
+async def test_post_commit_cancellation_is_audited_before_propagation(account_env):
+    account, _ = await account_env.add_token()
+    cancellation = asyncio.CancelledError("post-commit")
+
+    async def commit_then_cancel(api):
+        await api.idle_collect()
+        raise cancellation
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await account_env.service.mutate(
+            account.id, commit_then_cancel, actor=SCHEDULER
+        )
+
+    async with account_env.sessions() as session:
+        audit = await session.scalar(
+            select(AuditEvent)
+            .where(
+                AuditEvent.account_id == account.id,
+                AuditEvent.action == "account.mutate",
+            )
+            .order_by(AuditEvent.created_at.desc())
+        )
+    assert audit is not None
+    assert audit.result == {"status": "cancelled", "outcome": "ambiguous"}
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+    assert captured.value is cancellation
+
+
+async def test_unknown_account_audit_is_not_foreign_keyed(account_env):
+    missing = uuid4()
+
+    with pytest.raises(AccountNotFound):
+        await account_env.service.mutate(
+            missing, lambda api: api.idle_collect(), actor=SCHEDULER
+        )
+
+    async with account_env.sessions() as session:
+        audit = await session.scalar(
+            select(AuditEvent)
+            .where(AuditEvent.action == "account.mutate")
+            .order_by(AuditEvent.created_at.desc())
+        )
+    assert audit is not None
+    assert audit.account_id is None
+    assert audit.result == {"status": "failed", "error": "AccountNotFound"}
 
 
 async def test_timeout_after_commit_is_reconciled_once_with_none(account_env):

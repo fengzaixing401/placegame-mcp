@@ -8,8 +8,13 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from placegame.accounts.locks import account_lock
-from placegame.errors import ReconciliationRequired
-from placegame.models import ActionPlan, AccountSnapshot as AccountSnapshotRecord, GameAccount, Job
+from placegame.errors import AccountPaused, AccountRemoved, ReconciliationRequired
+from placegame.models import (
+    ActionPlan,
+    AccountSnapshot as AccountSnapshotRecord,
+    GameAccount,
+    Job,
+)
 from tests.unit.test_accounts import ADMIN, SCHEDULER, ServiceEnvironment
 
 
@@ -68,12 +73,59 @@ async def test_postgres_advisory_locks_serialize_one_account_but_not_another(iso
     await asyncio.gather(same, other, return_exceptions=True)
 
 
+async def test_service_mutations_serialize_one_account_but_not_another(isolation_env):
+    account_a, _ = await isolation_env.add_token("a")
+    account_b, _ = await isolation_env.add_token("b")
+    first_started = asyncio.Event()
+    same_started = asyncio.Event()
+    other_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first_operation(api):
+        first_started.set()
+        await release_first.wait()
+        return await api.idle_collect()
+
+    async def same_operation(api):
+        same_started.set()
+        return await api.idle_collect()
+
+    async def other_operation(api):
+        other_started.set()
+        return await api.idle_collect()
+
+    first = asyncio.create_task(
+        isolation_env.service.mutate(
+            account_a.id, first_operation, actor=SCHEDULER
+        )
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=2)
+    same = asyncio.create_task(
+        isolation_env.service.mutate(
+            account_a.id, same_operation, actor=SCHEDULER
+        )
+    )
+    other = asyncio.create_task(
+        isolation_env.service.mutate(
+            account_b.id, other_operation, actor=SCHEDULER
+        )
+    )
+    try:
+        await asyncio.wait_for(other_started.wait(), timeout=2)
+        await asyncio.wait_for(other, timeout=2)
+        assert same_started.is_set() is False
+    finally:
+        release_first.set()
+        await asyncio.wait_for(first, timeout=2)
+        await asyncio.wait_for(same, timeout=2)
+
+
 async def test_ten_accounts_keep_credentials_snapshots_plans_jobs_and_policy_isolated(
     isolation_env,
 ):
     accounts = []
     for index in range(10):
-        if index == 0:
+        if index in {0, 5}:
             account, _, _, _ = await isolation_env.add_credentials(f"account-{index}")
         else:
             account, _ = await isolation_env.add_token(f"account-{index}")
@@ -83,6 +135,7 @@ async def test_ten_accounts_keep_credentials_snapshots_plans_jobs_and_policy_iso
         account.id: await isolation_env.service.snapshot(account.id, actor=ADMIN)
         for account in accounts
     }
+    plans = {}
     async with isolation_env.sessions.begin() as session:
         for account in accounts:
             session.add(
@@ -95,22 +148,29 @@ async def test_ten_accounts_keep_credentials_snapshots_plans_jobs_and_policy_iso
                     misfire_policy="defer",
                 )
             )
-            session.add(
-                ActionPlan(
-                    account_id=account.id,
-                    state_fingerprint=snapshots[account.id].state_fingerprint,
-                    policy_version=1,
-                    proposed_actions=[{"kind": "idle_collect"}],
-                    estimated_costs={},
-                    risk="low",
-                    expires_at=isolation_env.clock() + timedelta(minutes=5),
-                    confirmation_required=False,
-                )
+            plan = ActionPlan(
+                account_id=account.id,
+                state_fingerprint=snapshots[account.id].state_fingerprint,
+                policy_version=1,
+                proposed_actions=[{"kind": "idle_collect"}],
+                estimated_costs={},
+                risk="low",
+                expires_at=isolation_env.clock() + timedelta(minutes=5),
+                confirmation_required=False,
             )
+            session.add(plan)
+            plans[account.id] = plan
+        await session.flush()
 
     async with isolation_env.sessions() as session:
         before_accounts = {
-            row.id: (row.enabled, row.paused_reason, row._session_token)
+            row.id: (
+                row.enabled,
+                row.paused_reason,
+                row._game_username,
+                row._password,
+                row._session_token,
+            )
             for row in (await session.scalars(select(GameAccount))).all()
             if row.id != accounts[0].id
         }
@@ -142,12 +202,19 @@ async def test_ten_accounts_keep_credentials_snapshots_plans_jobs_and_policy_iso
             accounts[0].id,
             lambda api: api.idle_collect(),
             actor=SCHEDULER,
+            plan_id=plans[accounts[0].id].id,
         )
     await isolation_env.service.disable(accounts[0].id, actor=ADMIN)
 
     async with isolation_env.sessions() as session:
         after_accounts = {
-            row.id: (row.enabled, row.paused_reason, row._session_token)
+            row.id: (
+                row.enabled,
+                row.paused_reason,
+                row._game_username,
+                row._password,
+                row._session_token,
+            )
             for row in (await session.scalars(select(GameAccount))).all()
             if row.id != accounts[0].id
         }
@@ -188,12 +255,35 @@ async def test_disable_drain_removes_only_after_lock_drains(isolation_env):
                 removal = asyncio.create_task(
                     isolation_env.service.disable_drain_remove(account.id, actor=ADMIN)
                 )
-                await asyncio.sleep(0.05)
-                async with isolation_env.sessions() as observer:
-                    current = await observer.get(GameAccount, account.id)
-                    assert current.enabled is False
+                current: GameAccount | None = None
+                for _ in range(50):
+                    async with isolation_env.sessions() as observer:
+                        current = await observer.get(GameAccount, account.id)
+                    if current is not None and current.paused_reason == "removing":
+                        break
+                    await asyncio.sleep(0.01)
+                assert current is not None
+                assert current.enabled is False
+                assert current.paused_reason == "removing"
                 assert removal.done() is False
+                enable = asyncio.create_task(
+                    isolation_env.service.enable(account.id, actor=ADMIN)
+                )
+                mutation = asyncio.create_task(
+                    isolation_env.service.mutate(
+                        account.id,
+                        lambda api: api.idle_collect(),
+                        actor=SCHEDULER,
+                    )
+                )
+                await asyncio.sleep(0.05)
+                assert enable.done() is False
+                assert mutation.done() is False
     receipt = await asyncio.wait_for(removal, timeout=2)
+    with pytest.raises((AccountPaused, AccountRemoved)):
+        await asyncio.wait_for(enable, timeout=2)
+    with pytest.raises((AccountPaused, AccountRemoved)):
+        await asyncio.wait_for(mutation, timeout=2)
 
     assert receipt.account_id == account.id
     assert (await isolation_env.service.get(account.id)).paused_reason == "removed"
