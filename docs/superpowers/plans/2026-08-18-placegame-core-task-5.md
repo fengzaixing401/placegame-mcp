@@ -231,7 +231,7 @@ Reviewer gate: reject the checkpoint if a policy row can be read with divergent 
 ```python
 ActionFamily = Literal["idle", "personal_boss", "ordinary_boss", "world_boss", "profession", "safe_reward"]
 DecisionState = Literal["selected", "skipped", "blocked"]
-PlanState = Literal["pending", "confirmed", "executed", "failed", "reconciliation_required"]
+PlanState = Literal["pending", "confirmed", "executing", "executed", "failed", "reconciliation_required"]
 TerminalPlanState = Literal["executed", "failed", "reconciliation_required"]
 RiskClass = Literal["low", "medium", "high"]
 
@@ -281,7 +281,7 @@ def test_typed_plan_json_round_trip_uses_aliases():
 
 def test_typed_plan_rejects_unknown_action_url_body_and_claim_all():
     with pytest.raises(ValidationError):
-        RegisteredAction.model_validate({"family": "idle", "kind": "claim_all", "url": "/x", "body": {}})
+        TypeAdapter(RegisteredAction).validate_python({"family": "idle", "kind": "claim_all", "url": "/x", "body": {}})
 
 def test_typed_plan_rejects_mixed_action_families():
     with pytest.raises(ValidationError):
@@ -471,7 +471,7 @@ Select the highest multiplier whose final preview predicts a win and meets `boss
 - preserve `selectedProfessionKey`, settle at five-minute maintenance boundaries, refill below two entries or six executable hours, never exceed five queue entries, plan a 12-hour horizon, and prioritize unlock milestones, configured stock (six food and twelve of each potion), then required inputs; and
 - use `SafeRewardPlanner` to select only completed, individual, no-choice, no-cost, non-overflowing candidates when inventory safety is available. Choice, cost, overflow, unknown kind, and unavailable inventory safety become stable skipped/blocked reasons. Never produce a claim-all action.
 
-Use the projections frozen in the design: idle accumulated/capacity seconds; personal boss evaluated entries, attempts, refresh, configuration, materials, equipment, potion/affix state, and preview; ordinary boss type/attempts/blocked/difficulty/refresh/preview; world instance keys/lifecycle/active/alive/attempt counters; profession specialization/queue/unlock/progress/actions/recipes/balances/recipe version; and every safe-reward candidate kind/identifier/completion/claim/choice/cost/overflow decision. Do not include policy fields or Beijing wall-clock eligibility in projections.
+Use the projections frozen in the design: idle accumulated/capacity seconds; personal boss evaluated entries, attempts, refresh, configuration, materials, equipment, potion/affix state, and preview; ordinary boss type/attempts/blocked/difficulty/refresh/preview; world instance keys/lifecycle/active/alive/attempt counters; profession specialization/queue/unlock/progress/actions/recipes/balances/recipe version; and every safe-reward candidate kind/identifier/completion/claim/choice/cost/overflow decision. Convert typed preview percentage floats to canonical decimal strings through `format(Decimal(str(value)).normalize(), "f")`, mapping negative zero to `"0"`, before constructing a projection; no float reaches `canonical_fingerprint`. Do not include policy fields or Beijing wall-clock eligibility in projections.
 
 - [ ] **Step 5: Implement matching operation-specific resolvers and fake-server state.**
 
