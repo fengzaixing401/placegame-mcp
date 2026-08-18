@@ -204,7 +204,11 @@ survival, balanced), previews at most 12 no-affix combinations, keeps the best
 three by predicted result, chance, player HP, boss HP, and deterministic tie
 order, then previews at most 12 affix combinations. Material boost is chosen
 only after combat configuration and only on hard/nightmare when the reserve of
-64 remains. Potions respect policy reserve and are not used on easy by default.
+64 remains. The optimizer may use an already active potion when it respects the
+policy reserve and the fight is not easy. Because no typed combat-potion equip
+endpoint has been observed or registered, a configuration that requires a
+potion change is recorded as `blocked`; Task 5 never guesses an endpoint or
+misuses `/api/professions/supply/equip` for combat supplies.
 
 Personal bosses use the free shared pool and evaluate nightmare, hard, normal.
 Ordinary bosses accept map entries and world entries with explicit solo
