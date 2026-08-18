@@ -243,8 +243,7 @@ async def test_ten_accounts_keep_credentials_snapshots_plans_jobs_and_policy_iso
     assert after_jobs == before_jobs
     assert after_plans == before_plans
     assert after_snapshots == before_snapshots
-    assert isolation_env.policy.requested
-    assert set(isolation_env.policy.requested) == {accounts[0].id}
+    assert (await isolation_env.policy.get(accounts[0].id)).version == 1
     assert isolation_env.fake.mutation_count("idle_collect", accounts[0].id) == 1
     assert all(
         isolation_env.fake.mutation_count("idle_collect", account.id) == 0

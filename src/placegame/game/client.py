@@ -364,7 +364,7 @@ class HttpGameClient:
         result = await self._request(
             "view_sections",
             ViewSections,
-            ViewSectionsRequest(sections=sections, section_etags=section_etags),
+            ViewSectionsRequest(sections=sections, sectionEtags=section_etags),
         )
         if "bosses" in sections and result.bosses is None:
             raise GameSchemaMismatch("view_sections", {"status_code": 200})
@@ -383,7 +383,7 @@ class HttpGameClient:
 
     async def boss_assist(self, boss_key: str) -> BossAssistResult:
         return await self._request(
-            "boss_assist", BossAssistResult, BossAssistRequest(boss_key=boss_key)
+            "boss_assist", BossAssistResult, BossAssistRequest(bossKey=boss_key)
         )
 
     async def profession_settle(self) -> ProfessionSettleResult:
@@ -395,7 +395,7 @@ class HttpGameClient:
         return await self._request(
             "profession_enqueue",
             ProfessionQueueResult,
-            ProfessionEnqueueRequest(action_key=action_key, count=count),
+            ProfessionEnqueueRequest(actionKey=action_key, count=count),
         )
 
     async def profession_supply_equip(
@@ -404,7 +404,7 @@ class HttpGameClient:
         return await self._request(
             "profession_supply_equip",
             ProfessionSupplyResult,
-            ProfessionSupplyEquipRequest(supply_type=supply_type, item_key=item_key),
+            ProfessionSupplyEquipRequest(supplyType=supply_type, itemKey=item_key),
         )
 
     async def daily_claim(self, point: int) -> RewardClaimResult:
@@ -414,22 +414,22 @@ class HttpGameClient:
 
     async def quest_claim(self, quest_key: str) -> RewardClaimResult:
         return await self._request(
-            "quest_claim", RewardClaimResult, QuestClaimRequest(quest_key=quest_key)
+            "quest_claim", RewardClaimResult, QuestClaimRequest(questKey=quest_key)
         )
 
     async def achievement_claim(self, achievement_key: str) -> RewardClaimResult:
         return await self._request(
             "achievement_claim",
             RewardClaimResult,
-            AchievementClaimRequest(achievement_key=achievement_key),
+            AchievementClaimRequest(achievementKey=achievement_key),
         )
 
     async def codex_claim(self, reward_key: str) -> RewardClaimResult:
         return await self._request(
-            "codex_claim", RewardClaimResult, CodexClaimRequest(reward_key=reward_key)
+            "codex_claim", RewardClaimResult, CodexClaimRequest(rewardKey=reward_key)
         )
 
     async def mail_claim(self, mail_id: str) -> RewardClaimResult:
         return await self._request(
-            "mail_claim", RewardClaimResult, MailClaimRequest(mail_id=mail_id)
+            "mail_claim", RewardClaimResult, MailClaimRequest(mailId=mail_id)
         )

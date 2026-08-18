@@ -61,6 +61,10 @@ class MutableClock:
         return self.value
 
 
+async def _resolved(value: str) -> str:
+    return value
+
+
 class ServiceEnvironment:
     def __init__(self, sessions, secret_box, engine) -> None:
         self.sessions = sessions
@@ -163,6 +167,13 @@ async def _add_plan(
         session.add(plan)
         await session.flush()
         return plan.id
+
+
+async def _plan_row(environment: ServiceEnvironment, plan_id: UUID) -> ActionPlan:
+    async with environment.sessions() as session:
+        plan = await session.get(ActionPlan, plan_id)
+        assert plan is not None
+        return plan
 
 
 def _jwt(exp: object) -> str:
@@ -771,6 +782,174 @@ async def test_invalid_plan_uses_stable_error_and_safe_audit_reference(account_e
         "error": "PlanPreconditionFailed",
     }
     assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_planned_mutation_terminalizes_success_and_audits_safely(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+
+    outcome = await account_env.service.mutate(
+        account.id,
+        lambda api: api.idle_collect(),
+        actor=SCHEDULER,
+        plan_id=plan_id,
+        state_fingerprint=lambda _api: _resolved(snapshot.state_fingerprint),
+    )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert outcome.applied is True
+    assert plan.execution_state == "executed"
+    assert plan.execution_result == {"status": "succeeded", "reconciled": False}
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
+async def test_planned_pre_send_failure_terminalizes_as_failed(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+
+    async def rejected(_api):
+        raise PlanPreconditionFailed()
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            rejected,
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=lambda _api: _resolved(snapshot.state_fingerprint),
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert plan.execution_state == "failed"
+    assert plan.execution_result == {"status": "failed", "error": "PlanPreconditionFailed"}
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_planned_ambiguous_outcome_requires_reconciliation(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    account_env.fake.commit_then_timeout("idle_collect", account.id)
+
+    with pytest.raises(ReconciliationRequired):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=lambda _api: _resolved(snapshot.state_fingerprint),
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert plan.execution_state == "reconciliation_required"
+    assert plan.execution_result == {"status": "ambiguous"}
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
+async def test_pre_send_cancellation_preserves_sendable_plan(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    cancellation = asyncio.CancelledError("before-send")
+
+    async def cancelled_resolver(_api):
+        raise cancellation
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=cancelled_resolver,
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert captured.value is cancellation
+    assert plan.execution_state == "pending"
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_planned_post_send_cancellation_requires_reconciliation(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    cancellation = asyncio.CancelledError("after-send")
+
+    async def sent_then_cancelled(api):
+        await api.idle_collect()
+        raise cancellation
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await account_env.service.mutate(
+            account.id,
+            sent_then_cancelled,
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=lambda _api: _resolved(snapshot.state_fingerprint),
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert captured.value is cancellation
+    assert plan.execution_state == "reconciliation_required"
+    assert plan.execution_result == {"status": "cancelled"}
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
+async def test_terminal_plan_replay_never_sends_a_second_mutation(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    resolver = lambda _api: _resolved(snapshot.state_fingerprint)
+
+    await account_env.service.mutate(
+        account.id,
+        lambda api: api.idle_collect(),
+        actor=SCHEDULER,
+        plan_id=plan_id,
+        state_fingerprint=resolver,
+    )
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=resolver,
+        )
+
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
+async def test_cross_account_plan_is_not_transitioned_or_audited_as_owned(account_env):
+    owner, _ = await account_env.add_token()
+    other, _ = await account_env.add_token()
+    plan_id = await _add_plan(account_env, owner.id, "owner-state")
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            other.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    async with account_env.sessions() as session:
+        audit = await session.scalar(
+            select(AuditEvent)
+            .where(
+                AuditEvent.account_id == other.id,
+                AuditEvent.action == "account.mutate",
+            )
+            .order_by(AuditEvent.created_at.desc())
+        )
+    assert plan.execution_state == "pending"
+    assert audit is not None
+    assert audit.plan_id is None
+    assert account_env.fake.mutation_count("idle_collect", other.id) == 0
 
 
 async def test_policy_update_invalidates_version_one_plan_before_mutation(account_env):

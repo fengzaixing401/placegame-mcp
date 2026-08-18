@@ -35,6 +35,7 @@ from placegame.errors import (
 )
 from placegame.game.client import GameApi
 from placegame.models import ActionPlan, GameAccount
+from placegame.policy.plans import PostgresPlanStore
 from placegame.security.crypto import SecretBox
 
 from .locks import account_lock, identity_lock
@@ -588,8 +589,10 @@ class AccountService:
         validated_plan_id: UUID | None = None
         validated_account_id: UUID | None = None
         cancelled: asyncio.CancelledError | None = None
+        send_started = False
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
+                plan_store = PostgresPlanStore(session)
                 try:
                     for attempt in range(3):
                         validated_plan_id = None
@@ -604,13 +607,9 @@ class AccountService:
                         )
                         policy = await self.policy_provider.get(account_id)
                         api = resolution.api
-                        candidate = (
-                            await session.get(
-                                ActionPlan, plan_id, populate_existing=True
-                            )
-                            if plan_id is not None
-                            else None
-                        )
+                        candidate = await session.get(
+                            ActionPlan, plan_id, populate_existing=True
+                        ) if plan_id is not None else None
                         if plan_id is not None:
                             if candidate is None or candidate.account_id != account_id:
                                 raise PlanPreconditionFailed() from None
@@ -636,9 +635,16 @@ class AccountService:
                             ):
                                 raise PlanPreconditionFailed() from None
                         try:
+                            send_started = True
                             value = await operation(api)
                         except asyncio.CancelledError as exc:
                             cancelled = exc
+                            if validated_plan_id is not None:
+                                await plan_store.finish(
+                                    validated_plan_id,
+                                    "reconciliation_required",
+                                    {"status": "cancelled"},
+                                )
                             await self._audit(
                                 session,
                                 actor=actor,
@@ -665,6 +671,12 @@ class AccountService:
                                 verified = await verify(api, None)
                             except asyncio.CancelledError as exc:
                                 cancelled = exc
+                                if validated_plan_id is not None:
+                                    await plan_store.finish(
+                                        validated_plan_id,
+                                        "reconciliation_required",
+                                        {"status": "cancelled"},
+                                    )
                                 await self._audit(
                                     session,
                                     actor=actor,
@@ -684,6 +696,12 @@ class AccountService:
                                 raise ReconciliationRequired() from None
                             record.last_success_at = self.clock()
                             outcome = MutationOutcome(True, True, None)
+                            if validated_plan_id is not None:
+                                await plan_store.finish(
+                                    validated_plan_id,
+                                    "executed",
+                                    {"status": "succeeded", "reconciled": True},
+                                )
                             await self._audit(
                                 session,
                                 actor=actor,
@@ -694,11 +712,23 @@ class AccountService:
                             )
                             break
                         except SessionRejected:
+                            if validated_plan_id is not None:
+                                await plan_store.finish(
+                                    validated_plan_id,
+                                    "failed",
+                                    {"status": "rejected"},
+                                )
                             raise AuthenticationRequired() from None
                         try:
                             await api.bootstrap()
                         except asyncio.CancelledError as exc:
                             cancelled = exc
+                            if validated_plan_id is not None:
+                                await plan_store.finish(
+                                    validated_plan_id,
+                                    "reconciliation_required",
+                                    {"status": "cancelled"},
+                                )
                             await self._audit(
                                 session,
                                 actor=actor,
@@ -717,6 +747,12 @@ class AccountService:
                                 verified = await verify(api, value)
                             except asyncio.CancelledError as exc:
                                 cancelled = exc
+                                if validated_plan_id is not None:
+                                    await plan_store.finish(
+                                        validated_plan_id,
+                                        "reconciliation_required",
+                                        {"status": "cancelled"},
+                                    )
                                 await self._audit(
                                     session,
                                     actor=actor,
@@ -734,6 +770,12 @@ class AccountService:
                                 raise ReconciliationRequired() from None
                         record.last_success_at = self.clock()
                         outcome = MutationOutcome(True, False, value)
+                        if validated_plan_id is not None:
+                            await plan_store.finish(
+                                validated_plan_id,
+                                "executed",
+                                {"status": "succeeded", "reconciled": False},
+                            )
                         await self._audit(
                             session,
                             actor=actor,
@@ -749,6 +791,21 @@ class AccountService:
                         if isinstance(exc, (AccountError, GameError))
                         else ReconciliationRequired()
                     )
+                    if validated_plan_id is not None:
+                        terminal = (
+                            "failed"
+                            if isinstance(exc, (PlanPreconditionFailed, GameConflict))
+                            else "reconciliation_required"
+                        )
+                        await plan_store.finish(
+                            validated_plan_id,
+                            terminal,
+                            (
+                                {"status": "failed", "error": type(pending).__name__}
+                                if terminal == "failed"
+                                else {"status": "ambiguous"}
+                            ),
+                        )
                     await self._audit(
                         session,
                         actor=actor,
