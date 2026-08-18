@@ -4,7 +4,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Literal, Protocol, TypeVar
+from typing import Final, Literal, Protocol, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -58,6 +58,15 @@ T = TypeVar("T", bound=BaseModel)
 ViewSection = str
 Sleeper = Callable[[float], Awaitable[None]]
 Clock = Callable[[], float]
+
+
+_STABLE_ERROR_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "conflict",
+        "insufficient_resource",
+        "inventory_full",
+    }
+)
 
 
 class GameApi(Protocol):
@@ -151,11 +160,7 @@ def _safe_error_code(response: httpx.Response) -> str | None:
         return None
     error = payload.get("error")
     candidate = error.get("code") if isinstance(error, dict) else payload.get("code")
-    if not isinstance(candidate, str) or not candidate:
-        return None
-    if len(candidate) > 64 or not all(
-        character.isalnum() or character in "_-.:" for character in candidate
-    ):
+    if not isinstance(candidate, str) or candidate not in _STABLE_ERROR_CODES:
         return None
     return candidate
 
@@ -356,11 +361,14 @@ class HttpGameClient:
         sections: tuple[ViewSection, ...],
         section_etags: dict[ViewSection, str] | None = None,
     ) -> ViewSections:
-        return await self._request(
+        result = await self._request(
             "view_sections",
             ViewSections,
             ViewSectionsRequest(sections=sections, section_etags=section_etags),
         )
+        if "bosses" in sections and result.bosses is None:
+            raise GameSchemaMismatch("view_sections", {"status_code": 200})
+        return result
 
     async def idle_collect(self) -> IdleCollectResult:
         return await self._request("idle_collect", IdleCollectResult)

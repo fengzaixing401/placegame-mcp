@@ -23,14 +23,57 @@ from placegame.game.registry import EndpointSpec, REGISTRY
 from placegame.game.schemas import BossChallengeRequest, BossPreviewRequest
 
 
+VALID_BOSS_DIFFICULTY = {
+    "key": "hard",
+    "predictedWin": True,
+    "chance": 88.0,
+    "playerHpRemainingPercent": 61.5,
+    "bossHpRemainingPercent": 0.0,
+}
+VALID_PERSONAL_BOSS = {
+    "key": "personal-boss-1",
+    "type": "personal",
+    "blockedReason": None,
+    "difficultyOptions": [VALID_BOSS_DIFFICULTY],
+    "personalAttemptPool": {
+        "freeRemaining": 2,
+        "freeLimit": 3,
+        "ticketUsed": 0,
+        "ticketLimit": 2,
+    },
+}
+VALID_MAP_BOSS = {
+    "key": "map-boss-1",
+    "type": "map",
+    "attempts": 2,
+    "blockedReason": None,
+    "difficultyOptions": [VALID_BOSS_DIFFICULTY],
+}
+VALID_WORLD_BOSS = {
+    "key": "world-boss-1",
+    "type": "world",
+    "blockedReason": "not_active",
+    "difficultyOptions": [VALID_BOSS_DIFFICULTY],
+    "refreshText": "opens at 20:00",
+}
+
+
 VALID_RESPONSES: dict[str, dict[str, Any]] = {
     "login": {"token": "new-session-token"},
     "bootstrap": {"accountId": "account-1"},
     "catalog": {"combatBalanceVersion": "balance-v1"},
     "idle_summary": {"accumulatedSeconds": 3600, "capacitySeconds": 43200},
-    "view_sections": {"sections": {"bosses": {"attempts": 1}}},
+    "view_sections": {
+        "sectionEtags": {"bosses": "bosses-etag"},
+        "bosses": [VALID_PERSONAL_BOSS, VALID_MAP_BOSS, VALID_WORLD_BOSS],
+    },
     "idle_collect": {"collected": True},
-    "boss_preview": {"predictedWin": True, "chance": 87.5},
+    "boss_preview": {
+        "predictedWin": True,
+        "chance": 87.5,
+        "playerHpRemainingPercent": 63.0,
+        "bossHpRemainingPercent": 0.0,
+    },
     "boss_challenge": {"won": True},
     "boss_assist": {"myAttemptCount": 1, "remainingAttemptCount": 2},
     "profession_settle": {"selectedProfessionKey": "smith", "queueSize": 1},
@@ -440,6 +483,161 @@ async def test_wrong_typed_response_core_becomes_schema_mismatch(
     assert_public_error_is_contained(captured.value)
 
 
+@pytest.mark.parametrize(
+    "invalid_data",
+    [
+        {"predictedWin": True, "chance": 85.0},
+        {
+            "predictedWin": True,
+            "chance": 85.0,
+            "playerHpRemainingPercent": "75",
+            "bossHpRemainingPercent": 0.0,
+        },
+        {
+            "predictedWin": False,
+            "chance": -1.0,
+            "playerHpRemainingPercent": 0.0,
+            "bossHpRemainingPercent": 100.0,
+        },
+        {
+            "predictedWin": False,
+            "chance": 20.0,
+            "playerHpRemainingPercent": 0.0,
+            "bossHpRemainingPercent": 101.0,
+        },
+    ],
+)
+async def test_boss_preview_rejects_incomplete_or_invalid_ranking_signals(
+    fake_game, game_client, invalid_data
+):
+    fake_game.register("POST", "/api/boss/preview", {"data": invalid_data})
+
+    with pytest.raises(GameSchemaMismatch):
+        await game_client.boss_preview(
+            BossPreviewRequest(
+                boss_key="boss",
+                difficulty="hard",
+                selected_skill_keys=[],
+                buff_key="none",
+                affix_key=None,
+                target_slot="weapon",
+                use_material_boost=False,
+            )
+        )
+
+
+async def test_view_sections_validates_public_top_level_boss_shape(fake_game, game_client):
+    fake_game.register(
+        "POST",
+        "/api/client/view-sections",
+        {
+            "data": {
+                **VALID_RESPONSES["view_sections"],
+                "professions": {"queue": []},
+                "unknownFutureSection": {"kept": True},
+            }
+        },
+    )
+
+    result = await game_client.view_sections(("bosses", "professions"))
+
+    assert result.section_etags == {"bosses": "bosses-etag"}
+    assert result.bosses is not None
+    personal, map_boss, world = result.bosses
+    assert personal.key == "personal-boss-1"
+    assert personal.personal_attempt_pool is not None
+    assert personal.personal_attempt_pool.free_remaining == 2
+    assert personal.attempts is None
+    assert personal.refresh_text is None
+    assert map_boss.key == "map-boss-1"
+    assert map_boss.attempts == 2
+    assert map_boss.personal_attempt_pool is None
+    assert world.key == "world-boss-1"
+    assert world.blocked_reason == "not_active"
+    assert world.refresh_text == "opens at 20:00"
+    assert world.difficulty_options[0].player_hp_remaining_percent == 61.5
+    assert result.model_extra["unknownFutureSection"] == {"kept": True}
+
+
+async def test_view_sections_allows_non_boss_request_without_bosses(fake_game, game_client):
+    fake_game.register(
+        "POST",
+        "/api/client/view-sections",
+        {
+            "data": {
+                "sectionEtags": {"professions": "professions-etag"},
+                "professions": {"queue": []},
+            }
+        },
+    )
+
+    result = await game_client.view_sections(("professions",))
+
+    assert result.section_etags == {"professions": "professions-etag"}
+    assert result.bosses is None
+    assert result.model_extra["professions"] == {"queue": []}
+
+
+async def test_view_sections_requires_bosses_when_bosses_were_requested(
+    fake_game, game_client
+):
+    fake_game.register(
+        "POST",
+        "/api/client/view-sections",
+        {"data": {"sectionEtags": {"bosses": "bosses-etag"}}},
+    )
+
+    with pytest.raises(GameSchemaMismatch):
+        await game_client.view_sections(("bosses",))
+
+
+@pytest.mark.parametrize(
+    ("base_boss", "boss_override"),
+    [
+        (VALID_MAP_BOSS, {"attempts": "two"}),
+        (VALID_MAP_BOSS, {"blockedReason": 7}),
+        (
+            VALID_MAP_BOSS,
+            {"difficultyOptions": [{**VALID_BOSS_DIFFICULTY, "chance": "likely"}]},
+        ),
+        (
+            VALID_MAP_BOSS,
+            {
+                "difficultyOptions": [
+                    {**VALID_BOSS_DIFFICULTY, "playerHpRemainingPercent": "61.5"}
+                ]
+            },
+        ),
+        (VALID_WORLD_BOSS, {"refreshText": 7}),
+        (
+            VALID_PERSONAL_BOSS,
+            {
+                "personalAttemptPool": {
+                    **VALID_PERSONAL_BOSS["personalAttemptPool"],
+                    "freeRemaining": "two",
+                },
+            },
+        ),
+    ],
+)
+async def test_view_sections_rejects_wrong_known_boss_field_types(
+    fake_game, game_client, base_boss, boss_override
+):
+    fake_game.register(
+        "POST",
+        "/api/client/view-sections",
+        {
+            "data": {
+                "sectionEtags": {"bosses": "bosses-etag"},
+                "bosses": [{**base_boss, **boss_override}],
+            }
+        },
+    )
+
+    with pytest.raises(GameSchemaMismatch):
+        await game_client.view_sections(("bosses",))
+
+
 async def test_get_and_post_reads_each_retry_exactly_three_timeouts(fake_game, game_client):
     register_success(fake_game, "GET", "/api/client/catalog", "catalog")
     fake_game.timeout("GET", "/api/client/catalog", count=3)
@@ -515,10 +713,11 @@ async def test_stable_envelope_and_status_mappings(
 
 
 async def test_unmapped_status_is_typed_with_allowlisted_metadata(fake_game, game_client):
+    error_code_marker = "pgm_" + "s" * 48
     fake_game.register(
         "GET",
         "/api/client/catalog",
-        {"error": {"code": "unknown_error"}, "secret": "raw-body-marker"},
+        {"error": {"code": error_code_marker}, "secret": "raw-body-marker"},
         status_code=400,
         headers={
             "Location": "https://example.invalid/?token=location-header-marker",
@@ -530,14 +729,31 @@ async def test_unmapped_status_is_typed_with_allowlisted_metadata(fake_game, gam
         await game_client.catalog()
 
     assert type(captured.value).__name__ == "GameHttpError"
-    assert captured.value.metadata == {"status_code": 400, "error_code": "unknown_error"}
+    assert captured.value.metadata == {"status_code": 400}
     assert_public_error_is_contained(
         captured.value,
+        error_code_marker,
         "raw-body-marker",
         "location-header-marker",
         "api-key-header-marker",
         "test-session-token",
     )
+
+
+async def test_unknown_conflict_code_is_not_retained(fake_game, game_client):
+    error_code_marker = "pgm_" + "c" * 48
+    fake_game.register(
+        "GET",
+        "/api/client/catalog",
+        {"error": {"code": error_code_marker}},
+        status_code=409,
+    )
+
+    with pytest.raises(GameConflict) as captured:
+        await game_client.catalog()
+
+    assert captured.value.code is None
+    assert_public_error_is_contained(captured.value, error_code_marker)
 
 
 async def test_read_5xx_is_typed_and_mutation_5xx_is_ambiguous(fake_game, game_client):

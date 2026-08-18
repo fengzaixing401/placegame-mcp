@@ -90,8 +90,40 @@ class IdleSummary(ResponseData):
     capacity_seconds: int = Field(alias="capacitySeconds", gt=0)
 
 
+class BossDifficultyOption(ResponseData):
+    key: str = Field(min_length=1)
+    predicted_win: bool = Field(alias="predictedWin")
+    chance: float = Field(ge=0, le=100)
+    player_hp_remaining_percent: float = Field(
+        alias="playerHpRemainingPercent", ge=0, le=100
+    )
+    boss_hp_remaining_percent: float = Field(
+        alias="bossHpRemainingPercent", ge=0, le=100
+    )
+
+
+class PersonalAttemptPool(ResponseData):
+    free_remaining: int = Field(alias="freeRemaining", ge=0)
+    free_limit: int = Field(alias="freeLimit", ge=0)
+    ticket_used: int = Field(alias="ticketUsed", ge=0)
+    ticket_limit: int = Field(alias="ticketLimit", ge=0)
+
+
+class BossSectionEntry(ResponseData):
+    key: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+    attempts: int | None = Field(default=None, ge=0)
+    blocked_reason: str | None = Field(alias="blockedReason")
+    difficulty_options: list[BossDifficultyOption] = Field(alias="difficultyOptions")
+    refresh_text: str | None = Field(default=None, alias="refreshText")
+    personal_attempt_pool: PersonalAttemptPool | None = Field(
+        default=None, alias="personalAttemptPool"
+    )
+
+
 class ViewSections(ResponseData):
-    sections: dict[str, object]
+    section_etags: dict[str, str] = Field(alias="sectionEtags")
+    bosses: list[BossSectionEntry] | None = None
 
 
 class IdleCollectResult(ResponseData):
@@ -101,6 +133,12 @@ class IdleCollectResult(ResponseData):
 class BossPreview(ResponseData):
     predicted_win: bool = Field(alias="predictedWin")
     chance: float = Field(ge=0, le=100)
+    player_hp_remaining_percent: float = Field(
+        alias="playerHpRemainingPercent", ge=0, le=100
+    )
+    boss_hp_remaining_percent: float = Field(
+        alias="bossHpRemainingPercent", ge=0, le=100
+    )
 
 
 class BossChallengeResult(ResponseData):
