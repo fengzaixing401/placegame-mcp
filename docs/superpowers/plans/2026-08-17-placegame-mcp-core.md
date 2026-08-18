@@ -93,6 +93,65 @@ class AccountTarget:
 
 ```python
 # src/placegame/accounts/service.py
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar
+from uuid import UUID
+
+T = TypeVar("T")
+
+if TYPE_CHECKING:
+    class VersionedPolicy(Protocol):
+        """Type-only forward declaration replaced by Task 5's concrete import."""
+        version: int
+
+class PolicyProvider(Protocol):
+    async def get(self, account_id: UUID) -> VersionedPolicy: ...
+
+class GameApiFactory(Protocol):
+    def __call__(self, session_token: str | None) -> GameApi: ...
+
+@dataclass(frozen=True)
+class ManagedAccount:
+    id: UUID
+    label: str
+    auth_mode: Literal["credentials", "token_only"]
+    enabled: bool
+    paused_reason: str | None
+    session_expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+@dataclass(frozen=True)
+class SessionState:
+    account_id: UUID
+    authenticated: bool
+    refreshed: bool
+    expires_at: datetime | None
+    paused_reason: str | None
+
+@dataclass(frozen=True)
+class RemovalReceipt:
+    account_id: UUID
+    removed_at: datetime
+    disabled_job_count: int
+
+@dataclass(frozen=True)
+class AccountSnapshot:
+    account_id: UUID
+    enabled: bool
+    paused_reason: str | None
+    authenticated: bool
+    session_expires_at: datetime | None
+    state: Mapping[str, object]
+    state_fingerprint: str
+    fetched_at: datetime
+    expires_at: datetime
+
 @dataclass
 class LockedAccount:
     account_id: UUID
@@ -122,8 +181,14 @@ class AccountService:
         *,
         actor: Actor,
         plan_id: UUID | None = None,
-        verify: Callable[[GameApi, T], Awaitable[bool]] | None = None,
+        verify: Callable[[GameApi, T | None], Awaitable[bool]] | None = None,
     ) -> MutationOutcome[T]: ...
+
+@dataclass(frozen=True)
+class MutationOutcome(Generic[T]):
+    applied: bool
+    reconciled: bool
+    result: T | None
 ```
 
 ```python
@@ -552,15 +617,24 @@ git commit -m "feat: add typed placegame http client"
 ### Task 4: Add Account Lifecycle, Session Renewal, Locks, and Reconciliation
 
 **Files:**
+- Create: `src/placegame/accounts/__init__.py`
 - Create: `src/placegame/accounts/repository.py`
 - Create: `src/placegame/accounts/locks.py`
 - Create: `src/placegame/accounts/reconcile.py`
 - Create: `src/placegame/accounts/service.py`
+- Modify: `src/placegame/contracts.py`
+- Modify: `src/placegame/errors.py`
+- Modify: `tests/fakes/game_server.py`
 - Test: `tests/unit/test_accounts.py`
 - Test: `tests/integration/test_account_isolation.py`
 
 **Interfaces:**
 - `AccountService.add_credentials`, `add_token_only`, `update_label`, `update_credentials`, `update_token_only`, `enable`, `disable`, `pause`, `resume`, `disable_drain_remove`, `get`, `ensure_session`, `locked`, `snapshot`, and `mutate` use the frozen shared signatures above.
+- Consumes `GameApi`, `GameAccount`, `AccountSnapshot`, `AuditEvent`, `Job`, `SecretBox`, and an injected game-client factory; callers can never supply a URL, path, arbitrary request body, plaintext persistence value, or second account to a locked operation.
+- Produces the consumer-owned `PolicyProvider.get(account_id) -> VersionedPolicy` port. Until Task 5 supplies the concrete service, the production default raises `PolicyUnavailable` before a typed game mutation is called; Task 4 does not create policy JSON or a concrete policy model.
+- Produces the exact sanitized `ManagedAccount`, `SessionState`, `RemovalReceipt`, and account-domain `AccountSnapshot` dataclasses in the shared interface. Import the ORM snapshot as `AccountSnapshotRecord` inside the repository so the persistence and domain names cannot be confused.
+- Consumes `GameApiFactory(session_token: str | None) -> GameApi` and an injected `token_expiry(token: str) -> datetime | None` resolver. The default resolver may read a numeric JWT `exp` claim after bounded base64url/JSON parsing but never trusts it as authentication; `bootstrap` remains authoritative.
+- Produces `MutationOutcome[T]` with independent `applied`, `reconciled`, and `result: T | None` fields. A verifier receives the real `T` after a normal response and `None` only when no response exists after an ambiguous transport outcome.
 
 - [ ] **Step 1: Write failing lifecycle and ambiguity tests**
 
@@ -577,11 +651,39 @@ async def test_token_only_pauses_when_refresh_is_needed(account_service, token_a
     await account_service.ensure_session(token_account.id, actor=scheduler_actor)
     assert (await account_service.get(token_account.id)).paused_reason == "session_refresh_required"
 
-async def test_timeout_after_commit_is_reconciled_without_duplicate(account_service, fake_game):
+async def test_timeout_after_commit_is_reconciled_without_duplicate(account_service, fake_game, token_account):
     fake_game.commit_then_timeout("idle_collect")
+    seen = []
+    async def idle_counter_increased(api, response):
+        seen.append(response)
+        return (await api.idle_summary()).accumulated_seconds == 0
     result = await account_service.mutate(token_account.id, lambda api: api.idle_collect(), actor=scheduler_actor, verify=idle_counter_increased)
     assert result.applied is True
+    assert result.reconciled is True
+    assert result.result is None
+    assert seen == [None]
     assert fake_game.mutation_count("idle_collect") == 1
+
+async def test_normal_response_is_passed_to_verifier(account_service, token_account):
+    seen = []
+    async def verified(api, response):
+        seen.append(response)
+        return True
+    outcome = await account_service.mutate(token_account.id, lambda api: api.idle_collect(), actor=scheduler_actor, verify=verified)
+    assert seen == [outcome.result]
+    assert outcome.result is not None
+    assert outcome.reconciled is False
+
+async def test_ambiguous_without_verifier_is_never_repeated(account_service, fake_game, token_account):
+    fake_game.commit_then_timeout("idle_collect")
+    with pytest.raises(ReconciliationRequired):
+        await account_service.mutate(token_account.id, lambda api: api.idle_collect(), actor=scheduler_actor)
+    assert fake_game.mutation_count("idle_collect") == 1
+
+async def test_default_policy_provider_fails_closed_before_write(account_service_without_policy, fake_game, token_account):
+    with pytest.raises(PolicyUnavailable):
+        await account_service_without_policy.mutate(token_account.id, lambda api: api.idle_collect(), actor=scheduler_actor)
+    assert fake_game.mutation_count("idle_collect") == 0
 
 async def test_disabling_one_account_blocks_only_its_new_mutations(account_service, account_a, account_b):
     await account_service.disable(account_a.id, actor=admin_actor)
@@ -617,7 +719,28 @@ async def account_lock(session: AsyncSession, account_id: UUID):
     yield
 ```
 
-`ensure_session` decrypts credentials only inside the lock, logs in when the token is absent/rejected/within 24 hours, retries failed login twice with increasing delays, and pauses only that account after three failed authentication cycles in one hour. Token-only accounts set `session_refresh_required` and emit a critical audit event. Label edits are validated and audited; credential/token edits verify `bootstrap` with the proposed secret before atomically replacing the encrypted value, and a failed verification preserves the old secret. `disable_drain_remove` disables new work, drains the account lock, cancels future jobs, deletes secrets, and preserves only tombstoned audit identity. `mutate` refreshes state, checks `enabled`/`paused_reason`, calls the typed operation once, invokes a verifier after success or any ambiguous outcome, reconciles before each of at most two conflict retries with jitter, and writes an audit event containing no secret values.
+Use a type-only structural declaration during Task 4 so static checks remain green without importing a module that Task 5 has not created:
+
+```python
+if TYPE_CHECKING:
+    class VersionedPolicy(Protocol):
+        version: int
+
+class PolicyProvider(Protocol):
+    async def get(self, account_id: UUID) -> VersionedPolicy: ...
+
+class FailClosedPolicyProvider:
+    async def get(self, account_id: UUID) -> VersionedPolicy:
+        raise PolicyUnavailable()
+```
+
+Task 5 replaces only the type-only declaration with an import of its concrete `VersionedPolicy`; the runtime port and `LockedAccount` do not change.
+
+`ensure_session` decrypts credentials only inside the lock, logs in when the token is absent/rejected/within 24 hours, retries failed login twice with increasing delays, and pauses only that account after three failed authentication cycles in one hour. Resolve and persist expiry from the injected token-expiry resolver whenever a token is added or renewed. An opaque token with no trustworthy expiry remains `None`: validate it with `bootstrap`, renew credential-mode accounts if the server rejects it, and pause token-only accounts if the server rejects it; never fabricate an expiry timestamp. Its public entry point owns a transaction and account lock; `mutate` and `locked` call one internal lock-aware routine with their existing transaction and never reacquire the advisory lock through another session. Token-only accounts set `session_refresh_required` and emit a critical audit event. Label edits are normalized to a non-empty value of at most 120 characters and audited; credential/token edits verify `bootstrap` with the proposed secret before atomically replacing the encrypted value, and a failed verification preserves the old secret. `disable_drain_remove` first disables new work, waits for the account lock, disables future jobs, clears all encrypted secrets, and keeps a disabled row with `paused_reason="removed"` so existing audit foreign keys retain a tombstoned account identity.
+
+`mutate` refreshes authoritative state, checks `enabled`/`paused_reason`, resolves the same account's policy, and rechecks any plan precondition before calling the typed operation. After a normal response it passes the real response to `verify`. After `AmbiguousMutation` it refreshes authoritative state and passes `None`; `True` returns `MutationOutcome(applied=True, reconciled=True, result=None)`, while a false result, verifier error, or missing verifier raises `ReconciliationRequired` and never repeats the mutation. Only a definite `GameConflict` uses the separate retry budget: refresh and recheck before each retry, add injected jitter, and stop after two retries. Every terminal path writes a redacted audit event containing no secret values.
+
+The integration test opens independent database sessions to prove same-account advisory locking serializes mutations while different-account locks can progress, seeds at least ten accounts, injects a session or mutation failure into one, and asserts no credentials, snapshots, policy lookup, jobs, or lifecycle state change for the other nine.
 
 - [ ] **Step 4: Run lifecycle, isolation, and reconciliation tests**
 
@@ -628,7 +751,7 @@ Expected: all tests pass; the injected account failure leaves other account snap
 - [ ] **Step 5: Commit the account checkpoint**
 
 ```bash
-git add src/placegame/accounts tests/unit/test_accounts.py tests/integration/test_account_isolation.py
+git add src/placegame/accounts src/placegame/contracts.py src/placegame/errors.py tests/fakes/game_server.py tests/unit/test_accounts.py tests/integration/test_account_isolation.py
 git commit -m "feat: add account locks and session reconciliation"
 ```
 

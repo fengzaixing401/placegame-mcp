@@ -1,6 +1,6 @@
 # PlaceGame Core Task 4 Contract Amendment
 
-**Status:** Awaiting written-spec review
+**Status:** Approved 2026-08-18
 
 **Scope:** Account policy dependency and ambiguous-mutation verification only
 
