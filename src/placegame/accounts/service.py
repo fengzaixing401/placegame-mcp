@@ -590,12 +590,15 @@ class AccountService:
         validated_account_id: UUID | None = None
         cancelled: asyncio.CancelledError | None = None
         send_started = False
+        candidate: ActionPlan | None = None
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
                 plan_store = PostgresPlanStore(session)
                 try:
                     for attempt in range(3):
+                        send_started = False
                         validated_plan_id = None
+                        candidate = None
                         record = await self._require_for_update(session, account_id)
                         validated_account_id = record.id
                         self._require_mutable(record)
@@ -795,17 +798,22 @@ class AccountService:
                         terminal = (
                             "failed"
                             if isinstance(exc, (PlanPreconditionFailed, GameConflict))
-                            else "reconciliation_required"
+                            else "reconciliation_required" if send_started else None
                         )
-                        await plan_store.finish(
-                            validated_plan_id,
-                            terminal,
-                            (
-                                {"status": "failed", "error": type(pending).__name__}
-                                if terminal == "failed"
-                                else {"status": "ambiguous"}
-                            ),
-                        )
+                        if terminal is not None and (
+                            candidate is None
+                            or candidate.execution_state
+                            not in {"executed", "failed", "reconciliation_required"}
+                        ):
+                            await plan_store.finish(
+                                validated_plan_id,
+                                terminal,
+                                (
+                                    {"status": "failed", "error": type(pending).__name__}
+                                    if terminal == "failed"
+                                    else {"status": "ambiguous"}
+                                ),
+                            )
                     await self._audit(
                         session,
                         actor=actor,

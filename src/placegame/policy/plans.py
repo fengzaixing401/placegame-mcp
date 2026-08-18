@@ -94,35 +94,58 @@ class MailClaimAction(_Action):
 
 RegisteredAction = Annotated[IdleCollectAction | BossChallengeAction | BossAssistAction | ProfessionSettleAction | ProfessionEnqueueAction | ProfessionSupplyEquipAction | DailyClaimAction | QuestClaimAction | AchievementClaimAction | CodexClaimAction | MailClaimAction, Field(discriminator="kind")]
 
-class SelectedDecision(_Action):
+class _Decision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+    family: ActionFamily
+    reason: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+
+
+class SelectedDecision(_Decision):
     state: Literal["selected"] = "selected"
-    reason: str = Field(min_length=1, pattern=r"^[\x20-\x7e]+$")
     action: RegisteredAction
 
-class SkippedDecision(_Action):
+    @model_validator(mode="after")
+    def validate_action_family(self) -> SelectedDecision:
+        if self.action.family != self.family:
+            raise ValueError("decision family must match action family")
+        return self
+
+
+class SkippedDecision(_Decision):
     state: Literal["skipped"] = "skipped"
-    reason: str = Field(min_length=1, pattern=r"^[\x20-\x7e]+$")
     action: RegisteredAction | None = None
 
-class BlockedDecision(_Action):
+    @model_validator(mode="after")
+    def validate_action_family(self) -> SkippedDecision:
+        if self.action is not None and self.action.family != self.family:
+            raise ValueError("decision family must match action family")
+        return self
+
+
+class BlockedDecision(_Decision):
     state: Literal["blocked"] = "blocked"
-    reason: str = Field(min_length=1, pattern=r"^[\x20-\x7e]+$")
     action: RegisteredAction | None = None
+
+    @model_validator(mode="after")
+    def validate_action_family(self) -> BlockedDecision:
+        if self.action is not None and self.action.family != self.family:
+            raise ValueError("decision family must match action family")
+        return self
 
 Decision = Annotated[SelectedDecision | SkippedDecision | BlockedDecision, Field(discriminator="state")]
 
 def _normalize(value: object) -> object:
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or type(value) in (bool, int, str):
         return value
-    if isinstance(value, float):
+    if type(value) is float:
         if not math.isfinite(value):
             raise TypeError("non-finite float is not canonical JSON")
         raise TypeError("float is not canonical JSON")
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         if not all(isinstance(k, str) for k in value):
             raise TypeError("mapping keys must be strings")
         return {k: _normalize(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+    if type(value) is list:
         return [_normalize(v) for v in value]
     raise TypeError(f"unsupported canonical JSON value: {type(value).__name__}")
 
@@ -130,15 +153,15 @@ def canonical_json(value: object) -> bytes:
     return json.dumps(_normalize(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 def _normalize_projection(value: object, keyed: Mapping[str, str], path: str = "") -> object:
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         if not all(isinstance(k, str) for k in value):
             raise TypeError("mapping keys must be strings")
         return {k: _normalize_projection(v, keyed, f"{path}.{k}" if path else k) for k, v in sorted(value.items())}
-    if isinstance(value, list):
+    if type(value) is list:
         vals = [_normalize_projection(v, keyed, path) for v in value]
         field = keyed.get(path, keyed.get(path.rsplit(".", 1)[-1]))
         if field is not None:
-            if not all(isinstance(v, Mapping) and isinstance(v.get(field), str) for v in vals):
+            if not all(type(v) is dict and isinstance(v.get(field), str) for v in vals):
                 raise TypeError("keyed arrays require string keys")
             vals.sort(key=lambda v: v[field])  # type: ignore[index]
         return vals
@@ -152,9 +175,8 @@ def _default_estimated_costs() -> EstimatedCosts:
     return EstimatedCosts(material=0, attempts=0, currency=0)
 
 
-class TypedActionPlan(BaseModel):
+class _PlanDetails(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
-    id: UUID = Field(default_factory=uuid4)
     account_id: UUID
     state_fingerprint: str = Field(pattern=r"^pgfp:v1:[0-9a-f]{64}$")
     policy_version: int = Field(ge=1)
@@ -163,6 +185,16 @@ class TypedActionPlan(BaseModel):
     risk: RiskClass
     expires_at: datetime
     confirmation_required: bool = True
+
+    @model_validator(mode="after")
+    def validate_decision_families(self) -> _PlanDetails:
+        if len({decision.family for decision in self.decisions}) != 1:
+            raise ValueError("plan decisions must have exactly one family")
+        return self
+
+
+class TypedActionPlan(_PlanDetails):
+    id: UUID = Field(default_factory=uuid4)
     confirmed_at: datetime | None = None
     confirmed_by: str | None = None
     execution_state: PlanState = "pending"
@@ -171,10 +203,7 @@ class TypedActionPlan(BaseModel):
 
     @property
     def family(self) -> ActionFamily:
-        families = {d.action.family for d in self.decisions if d.action is not None}
-        if len(families) != 1:
-            raise ValueError("plan actions must have exactly one family")
-        return next(iter(families))  # type: ignore[return-value]
+        return self.decisions[0].family
 
     @model_validator(mode="after")
     def validate_plan(self) -> TypedActionPlan:
@@ -192,8 +221,14 @@ class TypedActionPlan(BaseModel):
     def from_json(cls, value: Mapping[str, object]) -> TypedActionPlan:
         return cls.model_validate(value)
 
-class ActionPlanDraft(TypedActionPlan):
-    pass
+class ActionPlanDraft(_PlanDetails):
+    family: ActionFamily
+
+    @model_validator(mode="after")
+    def validate_declared_family(self) -> ActionPlanDraft:
+        if any(decision.family != self.family for decision in self.decisions):
+            raise ValueError("draft family must match every decision")
+        return self
 
 class PlanStore(Protocol):
     async def create(self, draft: ActionPlanDraft) -> TypedActionPlan: ...
@@ -212,7 +247,24 @@ class PostgresPlanStore:
 
     async def create(self, draft: ActionPlanDraft) -> TypedActionPlan:
         typed = ActionPlanDraft.model_validate(draft)
-        row = ActionPlan(id=typed.id, account_id=typed.account_id, state_fingerprint=typed.state_fingerprint, policy_version=typed.policy_version, proposed_actions=[d.model_dump(mode="json", by_alias=True) for d in typed.decisions], estimated_costs=typed.estimated_costs.model_dump(mode="json"), risk=typed.risk, expires_at=typed.expires_at, confirmation_required=typed.confirmation_required, confirmed_at=typed.confirmed_at, confirmed_by=typed.confirmed_by, execution_state=typed.execution_state, executed_at=typed.executed_at, execution_result=typed.execution_result)
+        row = ActionPlan(
+            account_id=typed.account_id,
+            state_fingerprint=typed.state_fingerprint,
+            policy_version=typed.policy_version,
+            proposed_actions=[
+                decision.model_dump(mode="json", by_alias=True)
+                for decision in typed.decisions
+            ],
+            estimated_costs=typed.estimated_costs.model_dump(mode="json"),
+            risk=typed.risk,
+            expires_at=typed.expires_at,
+            confirmation_required=typed.confirmation_required,
+            execution_state="pending",
+            confirmed_at=None,
+            confirmed_by=None,
+            executed_at=None,
+            execution_result=None,
+        )
         self.session.add(row)
         await self.session.flush()
         return self._typed(row)
@@ -230,7 +282,11 @@ class PostgresPlanStore:
 
     async def confirm(self, plan_id: UUID, account_id: UUID, *, actor: Actor) -> TypedActionPlan:
         row = await self.session.scalar(select(ActionPlan).where(ActionPlan.id == plan_id, ActionPlan.account_id == account_id).with_for_update())
-        if row is None or row.execution_state != "pending":
+        if (
+            row is None
+            or row.execution_state != "pending"
+            or row.expires_at <= datetime.now(timezone.utc)
+        ):
             raise PlanPreconditionFailed() from None
         row.execution_state = "confirmed"
         row.confirmed_at = datetime.now(timezone.utc)
@@ -240,18 +296,27 @@ class PostgresPlanStore:
         return self._typed(row)
 
     async def mark_executing(self, plan_id: UUID, expected_state: Literal["pending", "confirmed"]) -> None:
+        if expected_state not in ("pending", "confirmed"):
+            raise PlanPreconditionFailed() from None
         row = await self.session.scalar(select(ActionPlan).where(ActionPlan.id == plan_id).with_for_update())
-        if row is None or row.execution_state != expected_state:
+        if (
+            row is None
+            or row.execution_state != expected_state
+            or row.expires_at <= datetime.now(timezone.utc)
+            or (expected_state == "pending" and row.confirmation_required)
+        ):
             raise PlanPreconditionFailed() from None
         row.execution_state = "executing"
         await self.session.flush()
 
     async def finish(self, plan_id: UUID, status: TerminalPlanState, result: Mapping[str, object]) -> None:
+        if status not in ("executed", "failed", "reconciliation_required"):
+            raise PlanPreconditionFailed() from None
         row = await self.session.scalar(select(ActionPlan).where(ActionPlan.id == plan_id).with_for_update())
         if row is None:
             raise PlanPreconditionFailed() from None
         if row.execution_state in ("executed", "failed", "reconciliation_required"):
-            return
+            raise PlanPreconditionFailed() from None
         if row.execution_state not in ("pending", "confirmed", "executing"):
             raise PlanPreconditionFailed() from None
         safe: dict[str, object] = {}

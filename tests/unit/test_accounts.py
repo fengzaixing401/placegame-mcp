@@ -152,6 +152,8 @@ async def _add_plan(
     state_fingerprint: str,
     *,
     policy_version: int = 1,
+    expires_at: datetime | None = None,
+    confirmation_required: bool = False,
 ) -> UUID:
     async with environment.sessions.begin() as session:
         plan = ActionPlan(
@@ -161,8 +163,8 @@ async def _add_plan(
             proposed_actions=[{"kind": "idle_collect"}],
             estimated_costs={},
             risk="low",
-            expires_at=environment.clock() + timedelta(minutes=5),
-            confirmation_required=False,
+            expires_at=expires_at or environment.clock() + timedelta(minutes=5),
+            confirmation_required=confirmation_required,
         )
         session.add(plan)
         await session.flush()
@@ -872,6 +874,87 @@ async def test_pre_send_cancellation_preserves_sendable_plan(account_env):
     assert account_env.fake.mutation_count("idle_collect", account.id) == 0
 
 
+async def test_plan_resolver_schema_mismatch_preserves_sendable_plan_identity(account_env):
+    account, _ = await account_env.add_token()
+    plan_id = await _add_plan(account_env, account.id, "expected")
+    mismatch = GameSchemaMismatch("idle_summary", {"status_code": 200})
+
+    async def resolver(_api):
+        raise mismatch
+
+    with pytest.raises(GameSchemaMismatch) as captured:
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=resolver,
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert captured.value is mismatch
+    assert plan.execution_state == "pending"
+    assert plan.execution_result is None
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_retry_resolver_schema_mismatch_resets_send_state(account_env):
+    account, _ = await account_env.add_token()
+    plan_id = await _add_plan(account_env, account.id, "expected")
+    mismatch = GameSchemaMismatch("idle_summary", {"status_code": 200})
+    resolver_calls = 0
+
+    async def resolver(_api):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        if resolver_calls == 2:
+            raise mismatch
+        return "expected"
+
+    async def conflict(_api):
+        raise GameConflict("before-send-retry")
+
+    with pytest.raises(GameSchemaMismatch) as captured:
+        await account_env.service.mutate(
+            account.id,
+            conflict,
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=resolver,
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert captured.value is mismatch
+    assert resolver_calls == 2
+    assert plan.execution_state == "pending"
+
+
+async def test_planned_post_send_schema_mismatch_terminalizes_before_rethrow(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(account_env, account.id, snapshot.state_fingerprint)
+    mismatch = GameSchemaMismatch("idle_collect", {"status_code": 200})
+
+    async def sent_then_malformed(api):
+        await api.idle_collect()
+        raise mismatch
+
+    with pytest.raises(GameSchemaMismatch) as captured:
+        await account_env.service.mutate(
+            account.id,
+            sent_then_malformed,
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=lambda _api: _resolved(snapshot.state_fingerprint),
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert captured.value is mismatch
+    assert plan.execution_state == "reconciliation_required"
+    assert plan.execution_result == {"status": "ambiguous"}
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
 async def test_planned_post_send_cancellation_requires_reconciliation(account_env):
     account, _ = await account_env.add_token()
     snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
@@ -1003,6 +1086,62 @@ async def test_stale_state_fingerprint_rejects_plan_before_mutation(account_env)
             state_fingerprint=resolver,
         )
 
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_expired_plan_is_rejected_before_mutation(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(
+        account_env,
+        account.id,
+        snapshot.state_fingerprint,
+        expires_at=account_env.clock() - timedelta(seconds=1),
+    )
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=lambda _api: _resolved(snapshot.state_fingerprint),
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert plan.execution_state == "failed"
+    assert plan.execution_result == {
+        "status": "failed",
+        "error": "PlanPreconditionFailed",
+    }
+    assert account_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_unconfirmed_plan_is_rejected_before_mutation(account_env):
+    account, _ = await account_env.add_token()
+    snapshot = await account_env.service.snapshot(account.id, actor=ADMIN)
+    plan_id = await _add_plan(
+        account_env,
+        account.id,
+        snapshot.state_fingerprint,
+        confirmation_required=True,
+    )
+
+    with pytest.raises(PlanPreconditionFailed):
+        await account_env.service.mutate(
+            account.id,
+            lambda api: api.idle_collect(),
+            actor=SCHEDULER,
+            plan_id=plan_id,
+            state_fingerprint=lambda _api: _resolved(snapshot.state_fingerprint),
+        )
+
+    plan = await _plan_row(account_env, plan_id)
+    assert plan.execution_state == "failed"
+    assert plan.execution_result == {
+        "status": "failed",
+        "error": "PlanPreconditionFailed",
+    }
     assert account_env.fake.mutation_count("idle_collect", account.id) == 0
 
 
