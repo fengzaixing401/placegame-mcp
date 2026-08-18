@@ -6,6 +6,50 @@ class GameError(RuntimeError):
     """Base class for stable errors returned by the game API boundary."""
 
 
+class AccountError(RuntimeError):
+    """Base class for stable account-service errors."""
+
+
+class AccountNotFound(AccountError):
+    def __init__(self) -> None:
+        super().__init__("account not found")
+
+
+class AccountDisabled(AccountError):
+    def __init__(self) -> None:
+        super().__init__("account disabled")
+
+
+class AccountPaused(AccountError):
+    def __init__(self) -> None:
+        super().__init__("account paused")
+
+
+class AccountRemoved(AccountError):
+    def __init__(self) -> None:
+        super().__init__("account removed")
+
+
+class AuthenticationRequired(AccountError):
+    def __init__(self) -> None:
+        super().__init__("authentication required")
+
+
+class PolicyUnavailable(AccountError):
+    def __init__(self) -> None:
+        super().__init__("policy unavailable")
+
+
+class ReconciliationRequired(AccountError):
+    def __init__(self) -> None:
+        super().__init__("mutation reconciliation required")
+
+
+class PlanPreconditionFailed(AccountError):
+    def __init__(self) -> None:
+        super().__init__("plan precondition failed")
+
+
 class SessionRejected(GameError):
     pass
 

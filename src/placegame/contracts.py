@@ -1,9 +1,32 @@
+from dataclasses import dataclass
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy.dialects.postgresql import BYTEA
 from sqlalchemy.types import TypeDecorator
 
 from placegame.security.crypto import EncryptedSecret
+
+
+ActorKind = Literal["scheduler", "webui", "mcp"]
+
+
+@dataclass(frozen=True)
+class Actor:
+    kind: ActorKind
+    actor_id: str
+    scopes: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class AccountTarget:
+    account_id: UUID | None = None
+    account_ids: tuple[UUID, ...] = ()
+    all_enabled: bool = False
+
+    def validate(self) -> None:
+        if sum(bool(value) for value in (self.account_id, self.account_ids, self.all_enabled)) != 1:
+            raise ValueError("exactly one account selector is required")
 
 
 SECRET_FORMAT_VERSION = 1
