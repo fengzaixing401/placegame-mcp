@@ -41,6 +41,27 @@ def test_compose_argv_is_fixed_to_placegame_project(tmp_path) -> None:
     assert all(str(tmp_path / "deploy/compose.yaml") in command for command in runner.commands)
 
 
+def test_deploy_pulls_app_and_migrate_images(tmp_path) -> None:
+    runner = RecordingRunner()
+    Deployer(runner=runner, root=tmp_path, health_probe=lambda _url: True).deploy("sha256:" + "b" * 64)
+    assert any(command[-3:] == ("pull", "app", "migrate") for command in runner.commands)
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "PLACEGAME_IMAGE=" + IMAGE_REPOSITORY + "@sha256:" + "1" * 64 + "\nEXTRA=1\n",
+        "PLACEGAME_IMAGE=" + IMAGE_REPOSITORY + "@sha256:" + "1" * 64 + "\nPLACEGAME_IMAGE=" + IMAGE_REPOSITORY + "@sha256:" + "2" * 64 + "\n",
+        "PLACEGAME_IMAGE=" + IMAGE_REPOSITORY + "@sha256:" + "1" * 64 + " trailing\n",
+        "OTHER=1\n",
+    ],
+)
+def test_current_state_rejects_extra_or_malformed_content(tmp_path, contents: str) -> None:
+    tmp_path.joinpath("current.env").write_text(contents, encoding="ascii")
+    with pytest.raises(ValueError, match="invalid current state"):
+        Deployer(root=tmp_path)._read_current()
+
+
 def test_migration_failure_never_replaces_current_state_or_app(tmp_path) -> None:
     current = write_current(tmp_path, IMAGE_REPOSITORY + "@sha256:" + "1" * 64)
     runner = RecordingRunner(fail_when=("run", "--rm", "migrate"))

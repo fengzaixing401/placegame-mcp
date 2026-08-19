@@ -9,6 +9,8 @@ unset GHCR_TOKEN
 read -r -p "Published sha256 digest: " IMAGE_DIGEST
 [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 2
 sudo /opt/placegame-mcp/bin/deploy "$IMAGE_DIGEST"
+# Example shape only; replace the digest with a published 64-character value:
+# sudo /opt/placegame-mcp/bin/deploy sha256:<64 lowercase hex characters>
 curl --fail http://127.0.0.1:18080/health/live
 curl --fail http://127.0.0.1:18080/health/ready
 ```
