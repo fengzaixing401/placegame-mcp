@@ -527,6 +527,10 @@ class AccountService:
             record = await self._require(session, account_id)
             return self._managed(record)
 
+    async def list_accounts(self) -> tuple[ManagedAccount, ...]:
+        async with self.sessions() as session:
+            return tuple(self._managed(record) for record in await self.repository.list(session))
+
     async def ensure_session(
         self, account_id: UUID, *, actor: Actor
     ) -> SessionState:
@@ -537,20 +541,18 @@ class AccountService:
                 return resolution.state
 
     def locked(
-        self, account_id: UUID
+        self, account_id: UUID, *, actor: Actor = Actor("scheduler", "locked-context")
     ) -> AbstractAsyncContextManager[LockedAccount]:
-        return self._locked(account_id)
+        return self._locked(account_id, actor=actor)
 
     @asynccontextmanager
-    async def _locked(self, account_id: UUID) -> AsyncIterator[LockedAccount]:
+    async def _locked(self, account_id: UUID, *, actor: Actor) -> AsyncIterator[LockedAccount]:
         pending: AccountError | None = None
         async with self.sessions.begin() as session:
             async with account_lock(session, account_id):
                 record = await self._require_for_update(session, account_id)
                 self._require_mutable(record)
-                resolution = await self._ensure_locked(
-                    session, record, Actor("scheduler", "locked-context")
-                )
+                resolution = await self._ensure_locked(session, record, actor)
                 if resolution.api is None or resolution.bootstrap_account_id is None:
                     pending = AuthenticationRequired()
                 else:

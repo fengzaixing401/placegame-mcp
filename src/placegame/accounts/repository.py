@@ -23,6 +23,15 @@ class AccountRepository:
             .with_for_update()
         )
 
+    async def list(self, session: AsyncSession) -> list[GameAccount]:
+        return list(
+            (
+                await session.scalars(
+                    select(GameAccount).order_by(GameAccount.label.asc(), GameAccount.id.asc())
+                )
+            ).all()
+        )
+
     async def has_unresolved_identity(self, session: AsyncSession) -> bool:
         return bool(
             await session.scalar(
@@ -44,6 +53,7 @@ class AccountRepository:
         before: Mapping[str, Any] | None = None,
         after: Mapping[str, Any] | None = None,
         plan_id: UUID | None = None,
+        correlation_id: str | None = None,
     ) -> None:
         session.add(
             AuditEvent(
@@ -55,6 +65,7 @@ class AccountRepository:
                 result=dict(result) if result is not None else None,
                 before=dict(before) if before is not None else None,
                 after=dict(after) if after is not None else None,
+                correlation_id=correlation_id,
             )
         )
 

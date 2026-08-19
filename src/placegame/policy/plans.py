@@ -202,6 +202,10 @@ class TypedActionPlan(_PlanDetails):
     execution_state: PlanState = "pending"
     executed_at: datetime | None = None
     execution_result: ExecutionResult | None = None
+    execution_owner: str | None = None
+    execution_started_at: datetime | None = None
+    execution_lease_expires_at: datetime | None = None
+    execution_attempt_count: int = Field(default=0, ge=0)
 
     @property
     def family(self) -> ActionFamily:
@@ -253,7 +257,7 @@ class PostgresPlanStore:
 
     @staticmethod
     def _typed(row: ActionPlan) -> TypedActionPlan:
-        return TypedActionPlan.model_validate({"id": row.id, "account_id": row.account_id, "state_fingerprint": row.state_fingerprint, "policy_version": row.policy_version, "proposedActions": row.proposed_actions, "estimatedCosts": row.estimated_costs, "risk": row.risk, "expires_at": row.expires_at, "confirmation_required": row.confirmation_required, "confirmed_at": row.confirmed_at, "confirmed_by": row.confirmed_by, "execution_state": row.execution_state, "executed_at": row.executed_at, "execution_result": row.execution_result})
+        return TypedActionPlan.model_validate({"id": row.id, "account_id": row.account_id, "state_fingerprint": row.state_fingerprint, "policy_version": row.policy_version, "proposedActions": row.proposed_actions, "estimatedCosts": row.estimated_costs, "risk": row.risk, "expires_at": row.expires_at, "confirmation_required": row.confirmation_required, "confirmed_at": row.confirmed_at, "confirmed_by": row.confirmed_by, "execution_state": row.execution_state, "executed_at": row.executed_at, "execution_result": row.execution_result, "execution_owner": row.execution_owner, "execution_started_at": row.execution_started_at, "execution_lease_expires_at": row.execution_lease_expires_at, "execution_attempt_count": row.execution_attempt_count})
 
     async def create(self, draft: ActionPlanDraft) -> TypedActionPlan:
         typed = ActionPlanDraft.model_validate(draft)

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from zoneinfo import ZoneInfo
 
 from placegame.accounts.service import LockedAccount, StateFingerprintResolver
+from placegame.application.idle import IdlePlanner
 from placegame.boss_optimizer import BossOptimizer, BossSelection
 from placegame.errors import GameSchemaMismatch
 from placegame.game.client import GameApi
@@ -41,8 +42,8 @@ def _decimal_text(value: float) -> str:
 class PolicyEngine:
     async def build_idle_plan(self, locked: LockedAccount, *, now: datetime) -> TypedActionPlan:
         summary = await locked.api.idle_summary()
-        threshold = min(locked.policy.idle_threshold_minutes * 60, summary.capacity_seconds)
-        if summary.accumulated_seconds >= threshold:
+        planner = IdlePlanner()
+        if planner.decision(summary, locked.policy) == "collect":
             decision = SelectedDecision(
                 family="idle", reason="idle_threshold_reached", action=IdleCollectAction()
             )
@@ -52,7 +53,10 @@ class PolicyEngine:
             locked,
             "idle",
             [decision],
-            self.idle_projection(summary),
+            {
+                "capacitySeconds": summary.capacity_seconds,
+                "eligible": planner.decision(summary, locked.policy) == "collect",
+            },
             now,
         )
 

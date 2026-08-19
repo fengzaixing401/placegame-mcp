@@ -170,6 +170,10 @@ class ActionPlan(Base):
     execution_state: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     execution_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    execution_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    execution_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
@@ -196,8 +200,8 @@ class AuditEvent(Base):
     account_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("game_accounts.id", ondelete="RESTRICT"), nullable=True)
     plan_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("action_plans.id", ondelete="RESTRICT"), nullable=True)
     action: Mapped[str] = mapped_column(String(128), nullable=False)
-    costs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    costs: Mapped[dict | None] = mapped_column(RedactedJSON(), nullable=True)
+    result: Mapped[dict | None] = mapped_column(RedactedJSON(), nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     before: Mapped[dict | None] = mapped_column(RedactedJSON(), nullable=True)
     after: Mapped[dict | None] = mapped_column(RedactedJSON(), nullable=True)
