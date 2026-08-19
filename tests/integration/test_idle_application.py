@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -50,12 +51,13 @@ async def idle_env(idle_database_url, secret_box):
 async def test_idle_preview_claim_and_collect_are_account_scoped_and_single_send(idle_env):
     account_a, _ = await idle_env.add_token("alpha")
     account_b, _ = await idle_env.add_token("beta")
-    idle_env.fake.set_idle_seconds(account_a.id, 7200)
+    idle_env.fake.set_idle_seconds(account_a.id, 43200)
     previews = IdlePreviewStore(idle_env.sessions, idle_env.service.repository)
     previewer = IdlePlanUseCase(idle_env.service, previews, clock=idle_env.clock)
 
-    preview = await previewer.preview(
-        account_a.id, actor=OPERATOR, correlation_id="preview-alpha"
+    preview = await asyncio.wait_for(
+        previewer.preview(account_a.id, actor=OPERATOR, correlation_id="preview-alpha"),
+        timeout=2,
     )
     assert preview.plan_id is not None
     claims = IdleExecutionClaims(
@@ -78,7 +80,7 @@ async def test_idle_preview_claim_and_collect_are_account_scoped_and_single_send
 
 async def test_expired_execution_claim_recovers_without_sending_again(idle_env):
     account, _ = await idle_env.add_token("alpha")
-    idle_env.fake.set_idle_seconds(account.id, 7200)
+    idle_env.fake.set_idle_seconds(account.id, 43200)
     previews = IdlePreviewStore(idle_env.sessions, idle_env.service.repository)
     preview = await IdlePlanUseCase(idle_env.service, previews, clock=idle_env.clock).preview(
         account.id, actor=OPERATOR, correlation_id="preview-recovery"
@@ -104,7 +106,7 @@ async def test_expired_execution_claim_recovers_without_sending_again(idle_env):
 
 async def test_ambiguous_collect_reconciles_without_a_second_send(idle_env):
     account, _ = await idle_env.add_token("alpha")
-    idle_env.fake.set_idle_seconds(account.id, 7200)
+    idle_env.fake.set_idle_seconds(account.id, 43200)
     preview = await IdlePlanUseCase(
         idle_env.service,
         IdlePreviewStore(idle_env.sessions, idle_env.service.repository),
@@ -113,11 +115,14 @@ async def test_ambiguous_collect_reconciles_without_a_second_send(idle_env):
     assert preview.plan_id is not None
     idle_env.fake.commit_then_timeout("idle_collect", account.id)
 
-    result = await IdleExecuteUseCase(
-        idle_env.service,
-        IdleExecutionGuard(idle_env.sessions),
-        IdleExecutionClaims(idle_env.sessions, idle_env.service.repository, clock=idle_env.clock),
-    ).execute(account.id, preview.plan_id, actor=OPERATOR, correlation_id="execute-ambiguous")
+    result = await asyncio.wait_for(
+        IdleExecuteUseCase(
+            idle_env.service,
+            IdleExecutionGuard(idle_env.sessions),
+            IdleExecutionClaims(idle_env.sessions, idle_env.service.repository, clock=idle_env.clock),
+        ).execute(account.id, preview.plan_id, actor=OPERATOR, correlation_id="execute-ambiguous"),
+        timeout=2,
+    )
 
     assert result.status == "reconciled"
     assert idle_env.fake.mutation_count("idle_collect", account.id) == 1
@@ -125,7 +130,7 @@ async def test_ambiguous_collect_reconciles_without_a_second_send(idle_env):
 
 async def test_high_risk_plan_is_rejected_without_mutation(idle_env):
     account, _ = await idle_env.add_token("alpha")
-    idle_env.fake.set_idle_seconds(account.id, 7200)
+    idle_env.fake.set_idle_seconds(account.id, 43200)
     preview = await IdlePlanUseCase(
         idle_env.service,
         IdlePreviewStore(idle_env.sessions, idle_env.service.repository),

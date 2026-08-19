@@ -325,12 +325,12 @@ class IdlePlanUseCase:
                 "reason": "idle_threshold_reached" if decision == "collect" else "idle_threshold_not_reached",
                 "accountId": str(account_id),
             }
-            plan_id = await self.previews.save(
-                draft,
-                actor=actor,
-                correlation_id=correlation_id,
-                preview=preview,
-            )
+        plan_id = await self.previews.save(
+            draft,
+            actor=actor,
+            correlation_id=correlation_id,
+            preview=preview,
+        )
         return IdlePreview(
             account_id=account_id,
             plan_id=plan_id,
@@ -406,21 +406,49 @@ class IdleExecuteUseCase:
                 or locked.policy.version != claim.plan.policy_version
                 or self.planner.fingerprint(before, locked.policy) != claim.plan.state_fingerprint
             ):
-                await self.claims.finish(
-                    claim,
-                    status="failed",
-                    actor=actor,
-                    correlation_id=correlation_id,
-                    result={"status": "precondition_failed"},
-                )
-                raise PlanPreconditionFailed() from None
-            try:
-                response = await locked.api.idle_collect()  # type: ignore[attr-defined]
-                after = await locked.api.idle_summary()  # type: ignore[attr-defined]
-            except Exception:
-                return await self._reconcile_after_ambiguous(account_id, claim, actor, correlation_id, locked)
-            if not response.collected or after.accumulated_seconds >= before.accumulated_seconds:
-                return await self._require_reconciliation(claim, actor, correlation_id)
+                outcome = "precondition_failed"
+            else:
+                try:
+                    response = await locked.api.idle_collect()  # type: ignore[attr-defined]
+                    after = await locked.api.idle_summary()  # type: ignore[attr-defined]
+                except Exception:
+                    try:
+                        current = await locked.api.idle_summary()  # type: ignore[attr-defined]
+                    except Exception:
+                        outcome = "reconciliation_required"
+                    else:
+                        outcome = (
+                            "reconciled"
+                            if locked.policy.version == claim.plan.policy_version
+                            and self.planner.decision(current, locked.policy) == "wait"
+                            else "reconciliation_required"
+                        )
+                else:
+                    outcome = (
+                        "reconciliation_required"
+                        if not response.collected or after.accumulated_seconds >= before.accumulated_seconds
+                        else "executed"
+                    )
+        if outcome == "precondition_failed":
+            await self.claims.finish(
+                claim,
+                status="failed",
+                actor=actor,
+                correlation_id=correlation_id,
+                result={"status": "precondition_failed"},
+            )
+            raise PlanPreconditionFailed() from None
+        if outcome == "reconciliation_required":
+            return await self._require_reconciliation(claim, actor, correlation_id)
+        if outcome == "reconciled":
+            await self.claims.finish(
+                claim,
+                status="executed",
+                actor=actor,
+                correlation_id=correlation_id,
+                result={"status": "executed", "reconciled": True, "collected": True},
+            )
+            return IdleExecution(account_id=account_id, plan_id=claim.plan.id, status="reconciled", applied=True, reconciled=True, collected=True, correlation_id=correlation_id)
         await self.claims.finish(
             claim,
             status="executed",
@@ -437,22 +465,6 @@ class IdleExecuteUseCase:
             collected=True,
             correlation_id=correlation_id,
         )
-
-    async def _reconcile_after_ambiguous(self, account_id: UUID, claim: _Claim, actor: Actor, correlation_id: str, locked: LockedAccount) -> IdleExecution:
-        try:
-            current = await locked.api.idle_summary()  # type: ignore[attr-defined]
-        except Exception:
-            return await self._require_reconciliation(claim, actor, correlation_id)
-        if locked.policy.version == claim.plan.policy_version and self.planner.decision(current, locked.policy) == "wait":
-            await self.claims.finish(
-                claim,
-                status="executed",
-                actor=actor,
-                correlation_id=correlation_id,
-                result={"status": "executed", "reconciled": True, "collected": True},
-            )
-            return IdleExecution(account_id=account_id, plan_id=claim.plan.id, status="reconciled", applied=True, reconciled=True, collected=True, correlation_id=correlation_id)
-        return await self._require_reconciliation(claim, actor, correlation_id)
 
     async def _recover(self, account_id: UUID, claim: _Claim, actor: Actor, correlation_id: str) -> IdleExecution:
         async with self.accounts.locked(account_id, actor=actor) as locked:
