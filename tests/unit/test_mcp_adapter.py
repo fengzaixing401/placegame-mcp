@@ -6,6 +6,9 @@ from uuid import UUID, uuid4
 import pytest
 import re
 
+from mcp.server.fastmcp.exceptions import ToolError
+
+from placegame.application.errors import ApplicationError
 from placegame.application.models import (
     AccountStatus,
     AccountSummary,
@@ -15,8 +18,27 @@ from placegame.application.models import (
 )
 from placegame.contracts import Actor
 from placegame.mcp.adapter import MCP_ACTOR, create_mcp_server
-from placegame.application.errors import ApplicationError
-from placegame.errors import AccountNotFound, GameUnavailable
+from placegame.errors import (
+    AccountDisabled,
+    AccountIdentityConflict,
+    AccountNotFound,
+    AccountPaused,
+    AccountRemoved,
+    AmbiguousMutation,
+    AuthenticationRequired,
+    ContractChanged,
+    GameConflict,
+    GameHttpError,
+    GameRateLimited,
+    GameSchemaMismatch,
+    GameUnavailable,
+    InsufficientResource,
+    InventoryFull,
+    PlanPreconditionFailed,
+    PolicyUnavailable,
+    ReconciliationRequired,
+    SessionRejected,
+)
 
 
 class StatusFake:
@@ -98,18 +120,59 @@ async def test_test_mode_alone_registers_real_execute_signature():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error,code", [(ApplicationError("custom_code"), "custom_code"), (AccountNotFound(), "account_not_found"), (GameUnavailable("x"), "game_unavailable"), (RuntimeError("raw-body database cookie Authorization: Bearer never-log"), "internal_error")])
-async def test_errors_have_stable_codes_without_leaking_details(error, code, caplog):
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (ApplicationError("custom_code"), "custom_code"),
+        (AccountNotFound(), "account_not_found"),
+        (AccountIdentityConflict(), "account_identity_conflict"),
+        (AccountDisabled(), "account_disabled"),
+        (AccountPaused(), "account_paused"),
+        (AccountRemoved(), "account_removed"),
+        (AuthenticationRequired(), "authentication_required"),
+        (PolicyUnavailable(), "policy_unavailable"),
+        (ReconciliationRequired(), "reconciliation_required"),
+        (PlanPreconditionFailed(), "plan_precondition_failed"),
+        (SessionRejected(), "session_rejected"),
+        (ContractChanged(), "game_contract_changed"),
+        (
+            GameSchemaMismatch(
+                "schema", {"Authorization": "Bearer never-log", "cookie": "cookie-marker"}
+            ),
+            "game_contract_changed",
+        ),
+        (InventoryFull(), "inventory_full"),
+        (InsufficientResource({"database": "database-marker"}), "insufficient_resource"),
+        (GameConflict(), "game_conflict"),
+        (GameRateLimited(), "game_rate_limited"),
+        (AmbiguousMutation("mutation"), "ambiguous_mutation"),
+        (GameUnavailable("unavailable"), "game_unavailable"),
+        (GameHttpError("http", {"raw_body": "raw-body-marker"}), "game_unavailable"),
+        (
+            RuntimeError(
+                "Authorization: Bearer never-log cookie-marker database-marker raw-body-marker"
+            ),
+            "internal_error",
+        ),
+    ],
+)
+async def test_errors_have_stable_codes_without_leaking_details(
+    error: Exception, code: str, caplog: pytest.LogCaptureFixture
+) -> None:
     class FailingStatus(StatusFake):
         async def list(self):
             raise error
 
     status = FailingStatus()
     server = create_mcp_server(status, PreviewFake(status.account_id), ExecuteFake(), test_mode=False, allowed_hosts=[])
-    with pytest.raises(Exception) as caught:
+    with pytest.raises(ToolError) as caught:
         await server.call_tool("accounts_list", {})
     assert str(caught.value).endswith(code)
-    rendered = " ".join(record.getMessage() for record in caplog.records)
+    rendered = caplog.text
     assert "mcp_tool_failed" in rendered
-    if code == "internal_error":
-        assert "never-log" not in rendered and "raw-body" not in rendered and "database" not in rendered
+    if type(error) is RuntimeError:
+        assert code == "internal_error"
+    for marker in ("never-log", "cookie-marker", "database-marker", "raw-body-marker"):
+        assert marker not in rendered
+    assert "Traceback" not in rendered
+    assert all(record.exc_info is None and record.stack_info is None for record in caplog.records)
