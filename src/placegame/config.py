@@ -1,8 +1,18 @@
 from pathlib import Path
 from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr, model_validator
+import re
+
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from placegame.mcp.auth import validate_static_token
+
+
+_ALLOWED_HOST = re.compile(
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::\*)?\Z",
+    re.ASCII,
+)
 
 
 class Settings(BaseSettings):
@@ -17,6 +27,14 @@ class Settings(BaseSettings):
     master_key_b64: SecretStr | None = Field(None, alias="PLACEGAME_MASTER_KEY_B64")
     master_key_file: Path = Field(
         Path("/run/secrets/placegame_master_key"), alias="PLACEGAME_MASTER_KEY_FILE"
+    )
+    mcp_token: SecretStr | None = Field(None, alias="PLACEGAME_MCP_TOKEN")
+    mcp_token_file: Path = Field(
+        Path("/run/secrets/placegame_mcp_token"), alias="PLACEGAME_MCP_TOKEN_FILE"
+    )
+    mcp_allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["127.0.0.1:*", "localhost:*", "[::1]:*"],
+        alias="PLACEGAME_MCP_ALLOWED_HOSTS",
     )
     scheduler_lease_seconds: int = 30
     max_account_concurrency: int = 4
@@ -38,6 +56,13 @@ class Settings(BaseSettings):
             raise ValueError("test game_base_url must be loopback")
         return self
 
+    @field_validator("mcp_allowed_hosts")
+    @classmethod
+    def validate_mcp_allowed_hosts(cls, value: list[str]) -> list[str]:
+        if not value or any(_ALLOWED_HOST.fullmatch(host) is None for host in value):
+            raise ValueError("MCP allowed hosts must be exact ASCII hosts or host:*")
+        return value
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls.model_validate({})
@@ -54,3 +79,16 @@ class Settings(BaseSettings):
         if self.master_key_b64 is not None:
             return self.master_key_b64
         return SecretStr(self.master_key_file.read_text(encoding="ascii").strip())
+
+    def read_mcp_token(self) -> SecretStr:
+        if self.mcp_token is not None:
+            return SecretStr(validate_static_token(self.mcp_token.get_secret_value()))
+        try:
+            value = self.mcp_token_file.read_bytes().decode("ascii")
+            if value.endswith("\r\n"):
+                value = value.removesuffix("\r\n")
+            elif value.endswith("\n"):
+                value = value.removesuffix("\n")
+            return SecretStr(validate_static_token(value))
+        except (OSError, UnicodeDecodeError, ValueError):
+            raise ValueError("MCP token secret is unavailable") from None
