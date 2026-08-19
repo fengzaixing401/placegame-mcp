@@ -15,16 +15,62 @@ jobs:
         shell: bash
         run: |
           master_key="$(openssl rand -base64 32)"
-          docker run --detach --name placegame-p0 --env PLACEGAME_MASTER_KEY_B64="$master_key" placegame-mcp:ci
+          mcp_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          docker run --detach --name placegame-p2 \
+            --env PLACEGAME_MASTER_KEY_B64="$master_key" \
+            --env PLACEGAME_MCP_TOKEN="$mcp_token" \
+            placegame-mcp:ci
           for attempt in {1..30}; do
-            status="$(docker inspect --format='{{.State.Health.Status}}' placegame-p0)"
+            status="$(docker inspect --format='{{.State.Health.Status}}' placegame-p2)"
             if [ "$status" = "healthy" ]; then
               exit 0
             fi
             sleep 2
           done
-          docker logs placegame-p0
+          docker logs placegame-p2
           exit 1
+      - name: Smoke authenticated MCP
+        shell: bash
+        run: |
+          docker exec -i placegame-p2 python - <<'PY'
+          import asyncio
+          import os
+          import urllib.error
+          import urllib.request
+
+          import httpx
+          from mcp import ClientSession
+          from mcp.client.streamable_http import streamable_http_client
+
+
+          request = urllib.request.Request("http://127.0.0.1:8000/mcp", method="GET")
+          try:
+              urllib.request.urlopen(request, timeout=5)
+          except urllib.error.HTTPError as error:
+              assert error.code == 401
+              assert error.headers["WWW-Authenticate"] == "Bearer"
+              assert error.read() == b'{"error":"unauthorized"}'
+          else:
+              raise AssertionError("unauthenticated MCP request was accepted")
+
+
+          async def smoke() -> None:
+              async with httpx.AsyncClient(
+                  headers={"Authorization": f"Bearer {os.environ['PLACEGAME_MCP_TOKEN']}"}
+              ) as http:
+                  async with streamable_http_client(
+                      "http://127.0.0.1:8000/mcp", http_client=http
+                  ) as streams:
+                      async with ClientSession(streams[0], streams[1]) as session:
+                          await session.initialize()
+                          tools = await session.list_tools()
+              assert {tool.name for tool in tools.tools} == {
+                  "accounts_list", "account_status", "idle_preview"
+              }
+
+
+          asyncio.run(smoke())
+          PY
       - name: Remove container
         if: always()
-        run: docker rm --force placegame-p0 || true
+        run: docker rm --force placegame-p2 || true
