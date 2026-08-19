@@ -16,7 +16,7 @@ account status -> idle preview -> idle collect
 
 The slice must be usable from both MCP and a small WebUI before boss, profession, reward, or inventory automation grows further.
 
-The current uncommitted worktree is user-owned work in progress. It must not be reset, overwritten, or treated as a clean release baseline. New implementation starts from an explicitly recorded clean commit or a reviewed preservation commit.
+The current uncommitted worktree is user-owned work in progress. It must not be reset, overwritten, or treated as a clean release baseline. P0-P1 implementation starts in a new clean worktree and branch from the final documentation commit. The dirty Task 5C experiment remains untouched in its original worktree.
 
 ## 2. Product Goal
 
@@ -94,7 +94,7 @@ The application layer orchestrates existing account, policy, plan, game, and aud
 
 Retain the current crypto, secret framing, account advisory locking, session renewal, strict game schemas, policy versions, plan state machine, timeout reconciliation, and multi-account isolation. Do not extend the 1,260-line `AccountService` with transport or idle-specific behavior. New orchestration belongs in the application layer.
 
-Before implementation, replace the dirty `object + getattr + cast` state-source experiment with typed application ports or concrete typed readers. Production Pyright must report zero errors.
+The dirty Task 5C `object + getattr + cast` state-source experiment is deferred with the boss, profession, and reward work. It is not copied into P0-P1. New P0-P1 ports are fully typed and production Pyright must report zero errors.
 
 ### Transport layer
 
@@ -116,7 +116,7 @@ Application responses are strict models. Minimum fields are:
 AccountSummary: account_id, label, enabled, paused_reason, authenticated
 AccountStatus: account, bootstrap identity, idle summary, fetched_at
 IdlePreview: optional plan_id, decision, accumulated_seconds, capacity_seconds,
-             threshold_seconds, expires_at, reason
+             threshold_seconds, expires_at, reason, correlation_id
 IdleExecution: plan_id, status, applied, reconciled, collected summary,
                correlation_id
 ```
@@ -133,20 +133,24 @@ IdleExecution: plan_id, status, applied, reconciled, collected summary,
 4. Read authoritative bootstrap/status and idle summary.
 5. Load the current versioned policy.
 6. Decide `collect` or `wait` using the lower of the configured threshold and server capacity.
-7. Persist a typed, expiring action plan with policy version and a canonical idle eligibility fingerprint when the decision is `collect`. The fingerprint contains server capacity and whether the threshold is currently satisfied; it does not contain the exact accumulated second, which naturally changes with time.
-8. Return a sanitized preview and audit the decision.
+7. Atomically persist a typed, expiring action plan and its `idle.preview` audit when the decision is `collect`. The plan contains policy version and a canonical idle eligibility fingerprint. The fingerprint contains server capacity and whether the threshold is currently satisfied; it does not contain the exact accumulated second, which naturally changes with time.
+8. For a `wait` decision, persist only the audit in the same typed persistence boundary.
+9. Return a sanitized preview whose correlation ID matches the audit.
 
 ### Execute
 
 1. Authenticate and authorize the caller and account.
-2. Load the referenced plan and verify ownership, state, expiry, and risk class.
-3. Acquire the account mutation lock.
-4. Re-read policy and authoritative idle state.
+2. Acquire a PostgreSQL session-level execution guard in a namespace separate from the normal account transaction lock. Hold it until the attempt is terminalized or the process connection closes.
+3. In a short committed transaction, load the referenced plan and verify ownership, pending/confirmed state, expiry, low risk, no confirmation requirement, and the exact single `IdleCollectAction` shape. Persist `execution_state=executing`, a random owner, attempt count, start time, and a two-minute lease expiry before any game mutation can be sent.
+4. Acquire the normal account mutation lock, re-read policy and authoritative idle state, and require the same execution owner.
 5. Reject stale policy, changed server capacity, or a no-longer-eligible idle state without sending a mutation. Natural accumulation while eligibility remains true does not invalidate the plan.
 6. Call only `GameApi.idle_collect()`.
 7. Verify that accumulated idle time reset or decreased as expected.
 8. On a post-send timeout, reconcile from authoritative state and never blindly retry.
-9. Terminalize the plan, persist a sanitized audit result, and return a stable application result.
+9. Terminalize the plan and persist a sanitized audit result in the mutation transaction, then release the execution guard.
+10. If the process exits after the claim commit, the claim remains `executing` while the session-level guard is released automatically by PostgreSQL. A later caller that acquires the guard must perform authoritative reconciliation only; it must never resend the mutation. If the result cannot be proven, mark `reconciliation_required`.
+
+An active holder prevents a second executor from claiming, reconciling, or terminalizing while the first request is still in flight. Even if the session guard connection disappears, a second caller treats an unexpired execution lease as `plan_in_progress`. Recovery requires both successful guard acquisition and an expired lease. The lease never permits bypassing the session-level guard.
 
 ## 8. Error Model
 
@@ -159,6 +163,7 @@ Stable application error codes include:
 - `forbidden_account`
 - `plan_not_found`
 - `plan_not_executable`
+- `plan_in_progress`
 - `plan_expired`
 - `plan_stale`
 - `game_contract_changed`
@@ -185,7 +190,7 @@ Tests are divided into fast and environment-dependent gates:
 - Pure unit tests do not require Docker or PostgreSQL.
 - PostgreSQL tests are marked `integration` and skip with a clear reason when no explicit test database or Docker runtime is available.
 - A fake game server covers status, idle threshold, collection, session rejection, schema mismatch, conflict, and commit-then-timeout reconciliation.
-- Contract fixtures are redacted, versioned, and validated against strict schemas.
+- Synthetic contract fixtures are redacted, versioned, and validated against strict schemas. They carry provenance and are not represented as live-verified responses.
 - MCP protocol tests cover initialize, tool listing, successful calls, scopes, account allowlists, malformed input, and secret leakage.
 - Admin API and WebUI tests cover the same preview and execute behavior.
 - Playwright checks the WebUI at desktop and mobile widths for rendering, focus, loading, error, and success states.
@@ -200,7 +205,7 @@ The standard gate must not report Docker absence as hundreds of test errors. It 
 - Preserve the dirty worktree and record its relation to commit `97047c3`.
 - Establish fast-unit and explicit-integration test markers.
 - Restore production Pyright to zero.
-- Validate or capture redacted status and idle API fixtures without storing credentials.
+- Validate synthetic status and idle API fixtures, record their provenance, and mark the live PlaceGame contract `live_contract_unverified` until an opt-in credentialed capture is redacted and reviewed. P2 cannot expose a real mutation while this gate remains unverified.
 
 ### P1: Shared backend idle slice
 
@@ -240,7 +245,9 @@ Add administrator password, TOTP and recovery codes, CSRF protection, rate limit
 - A fake game account can return status, produce `wait` or `collect`, and execute one valid collect plan.
 - A stale, expired, cross-account, disabled, paused, or non-collect plan sends no game mutation.
 - A commit-then-timeout scenario sends exactly one mutation and returns a reconciled or reconciliation-required result.
+- A game commit followed by process exit before the terminal database commit leaves a durable execution claim; recovery performs only authoritative reconciliation and the mutation count remains exactly one.
 - Two accounts cannot share credentials, state, plans, or mutations.
+- Idle preview plan creation and audit persistence are atomic; audit failure leaves no executable plan.
 - All persisted audit structures are centrally redacted.
 - Fast tests pass without Docker; integration tests are explicit; production Pyright reports zero errors.
 - No MCP, WebUI, scheduler, boss, profession, reward, or inventory scope is smuggled into the P0-P1 implementation task.
