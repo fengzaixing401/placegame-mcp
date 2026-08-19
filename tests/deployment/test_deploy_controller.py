@@ -87,7 +87,11 @@ def test_health_failure_restores_prior_app_only(tmp_path) -> None:
         Deployer(runner=runner, root=tmp_path, health_probe=lambda _url: False, health_attempts=2).deploy("sha256:" + "2" * 64)
     assert (tmp_path / "current.env").read_text(encoding="ascii").endswith("1" * 64 + "\n")
     assert any(command[-2:] == ("pull", "app") for command in runner.commands)
-    assert any(command[-4:] == ("up", "-d", "--no-deps", "app") for command in runner.commands)
+    assert any(
+        str(tmp_path / "current.env") in command
+        and command[-4:] == ("up", "-d", "--no-deps", "app")
+        for command in runner.commands
+    )
     assert not any("down" in command for command in runner.commands)
 
 
@@ -106,6 +110,35 @@ def test_rollback_up_runs_when_rollback_pull_fails(tmp_path) -> None:
     assert str(exc_info.value) == "health check failed"
     assert any(command[-2:] == ("pull", "app") for command in runner.commands)
     assert any(command[-4:] == ("up", "-d", "--no-deps", "app") for command in runner.commands)
+
+
+def test_rollback_up_failure_preserves_health_error(tmp_path) -> None:
+    write_current(tmp_path, IMAGE_REPOSITORY + "@sha256:" + "1" * 64)
+
+    class RollbackUpFailingRunner(RecordingRunner):
+        def run(self, argv: tuple[str, ...]) -> None:
+            self.commands.append(argv)
+            if str(tmp_path / "current.env") in argv and argv[-4:] == ("up", "-d", "--no-deps", "app"):
+                raise RuntimeError("rollback up failed")
+
+    runner = RollbackUpFailingRunner()
+    with pytest.raises(RuntimeError, match="health check failed"):
+        Deployer(runner=runner, root=tmp_path, health_probe=lambda _url: False, health_attempts=1).deploy("sha256:" + "2" * 64)
+    assert any(str(tmp_path / "current.env") in command and command[-2:] == ("pull", "app") for command in runner.commands)
+    assert any(str(tmp_path / "current.env") in command and command[-4:] == ("up", "-d", "--no-deps", "app") for command in runner.commands)
+
+
+def test_health_attempts_are_bounded_at_thirty(tmp_path) -> None:
+    probes = 0
+
+    def unhealthy(_url: str) -> bool:
+        nonlocal probes
+        probes += 1
+        return False
+
+    with pytest.raises(RuntimeError, match="health"):
+        Deployer(runner=RecordingRunner(), root=tmp_path, health_probe=unhealthy, health_attempts=31).deploy("sha256:" + "2" * 64)
+    assert probes <= 30
 
 
 def test_first_deploy_health_failure_stops_only_app(tmp_path) -> None:

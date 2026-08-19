@@ -10,9 +10,27 @@ install -o root -g root -m 0644 "$SRC/placegame_deploy.py" "$ROOT/deploy/placega
 install -o root -g root -m 0755 "$SRC/bin/deploy" "$ROOT/bin/deploy"
 install -d -o root -g root -m 0700 "$ROOT/secrets"
 umask 077
-if [ ! -e "$ROOT/secrets/postgres_password" ]; then python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > "$ROOT/secrets/postgres_password"; fi
-if [ ! -e "$ROOT/secrets/master_key" ]; then python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > "$ROOT/secrets/master_key"; fi
-if [ ! -e "$ROOT/secrets/mcp_token" ]; then python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > "$ROOT/secrets/mcp_token"; fi
-if [ ! -e "$ROOT/secrets/database_url" ]; then password=$(<"$ROOT/secrets/postgres_password"); printf 'postgresql+asyncpg://placegame:%s@postgres:5432/placegame' "$password" > "$ROOT/secrets/database_url"; fi
+write_atomic() {
+  target=$1
+  shift
+  if [ -e "$target" ]; then return 0; fi
+  temp=$(mktemp "$ROOT/secrets/.tmp.XXXXXX")
+  chmod 0600 "$temp"
+  chown root:root "$temp"
+  if ! "$@" > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  mv "$temp" "$target"
+}
+write_token() { python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")'; }
+write_database_url() {
+  password=$(<"$ROOT/secrets/postgres_password")
+  printf 'postgresql+asyncpg://placegame:%s@postgres:5432/placegame' "$password"
+}
+write_atomic "$ROOT/secrets/postgres_password" write_token
+write_atomic "$ROOT/secrets/master_key" write_token
+write_atomic "$ROOT/secrets/mcp_token" write_token
+write_atomic "$ROOT/secrets/database_url" write_database_url
 chmod 0600 "$ROOT/secrets"/*
 chown root:root "$ROOT/secrets"/*

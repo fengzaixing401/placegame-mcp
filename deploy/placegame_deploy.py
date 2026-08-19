@@ -100,9 +100,16 @@ class Deployer:
         self.runner.run(self._compose(candidate, "--profile", "tools", "run", "--rm", "migrate"))
         try:
             self.runner.run(self._compose(candidate, "up", "-d", "--no-deps", "app"))
-            for attempt in range(self.health_attempts):
+            probe_budget = 30
+            for attempt in range(min(self.health_attempts, 30)):
+                if probe_budget <= 0:
+                    break
                 live = self.health_probe("http://127.0.0.1:18080/health/live")
-                ready = self.health_probe("http://127.0.0.1:18080/health/ready")
+                probe_budget -= 1
+                ready = False
+                if live and probe_budget > 0:
+                    ready = self.health_probe("http://127.0.0.1:18080/health/ready")
+                    probe_budget -= 1
                 if live and ready:
                     if prior:
                         self._write(self.root / "state/previous-image", prior + "\n")
