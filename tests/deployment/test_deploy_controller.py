@@ -109,7 +109,11 @@ def test_rollback_up_runs_when_rollback_pull_fails(tmp_path) -> None:
         Deployer(runner=runner, root=tmp_path, health_probe=lambda _url: False, health_attempts=1).deploy("sha256:" + "2" * 64)
     assert str(exc_info.value) == "health check failed"
     assert any(command[-2:] == ("pull", "app") for command in runner.commands)
-    assert any(command[-4:] == ("up", "-d", "--no-deps", "app") for command in runner.commands)
+    assert any(
+        str(tmp_path / "current.env") in command
+        and command[-4:] == ("up", "-d", "--no-deps", "app")
+        for command in runner.commands
+    )
 
 
 def test_rollback_up_failure_preserves_health_error(tmp_path) -> None:
@@ -129,8 +133,16 @@ def test_rollback_up_failure_preserves_health_error(tmp_path) -> None:
 
 
 def test_health_attempts_are_bounded_at_thirty(tmp_path) -> None:
+    probes = 0
+
+    def probe(_url: str) -> bool:
+        nonlocal probes
+        probes += 1
+        return False
+
     with pytest.raises(ValueError, match="health_attempts"):
-        Deployer(runner=RecordingRunner(), root=tmp_path, health_attempts=31)
+        Deployer(runner=RecordingRunner(), root=tmp_path, health_probe=probe, health_attempts=31)
+    assert probes == 0
 
 
 def test_first_deploy_health_failure_stops_only_app(tmp_path) -> None:
