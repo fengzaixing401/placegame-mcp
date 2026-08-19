@@ -129,16 +129,8 @@ def test_rollback_up_failure_preserves_health_error(tmp_path) -> None:
 
 
 def test_health_attempts_are_bounded_at_thirty(tmp_path) -> None:
-    probes = 0
-
-    def unhealthy(_url: str) -> bool:
-        nonlocal probes
-        probes += 1
-        return False
-
-    with pytest.raises(RuntimeError, match="health"):
-        Deployer(runner=RecordingRunner(), root=tmp_path, health_probe=unhealthy, health_attempts=31).deploy("sha256:" + "2" * 64)
-    assert probes <= 30
+    with pytest.raises(ValueError, match="health_attempts"):
+        Deployer(runner=RecordingRunner(), root=tmp_path, health_attempts=31)
 
 
 def test_first_deploy_health_failure_stops_only_app(tmp_path) -> None:

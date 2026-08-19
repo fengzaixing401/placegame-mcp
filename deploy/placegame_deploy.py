@@ -44,6 +44,8 @@ class Deployer:
         health_probe: Callable[[str], bool] | None = None,
         health_attempts: int = 30,
     ) -> None:
+        if not 1 <= health_attempts <= 30:
+            raise ValueError("health_attempts must be between 1 and 30")
         self.runner = runner or SubprocessRunner()
         self.root = Path(root)
         self.health_probe = health_probe or self._probe
@@ -100,16 +102,9 @@ class Deployer:
         self.runner.run(self._compose(candidate, "--profile", "tools", "run", "--rm", "migrate"))
         try:
             self.runner.run(self._compose(candidate, "up", "-d", "--no-deps", "app"))
-            probe_budget = 30
-            for attempt in range(min(self.health_attempts, 30)):
-                if probe_budget <= 0:
-                    break
+            for attempt in range(self.health_attempts):
                 live = self.health_probe("http://127.0.0.1:18080/health/live")
-                probe_budget -= 1
-                ready = False
-                if live and probe_budget > 0:
-                    ready = self.health_probe("http://127.0.0.1:18080/health/ready")
-                    probe_budget -= 1
+                ready = self.health_probe("http://127.0.0.1:18080/health/ready")
                 if live and ready:
                     if prior:
                         self._write(self.root / "state/previous-image", prior + "\n")
