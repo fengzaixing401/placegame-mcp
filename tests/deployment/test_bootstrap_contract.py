@@ -14,7 +14,8 @@ def test_bootstrap_never_accepts_or_echoes_credentials() -> None:
 def test_bootstrap_generates_missing_secrets_via_atomic_temp_files() -> None:
     script = (ROOT / "deploy/bootstrap.sh").read_text(encoding="utf-8")
     assert 'mktemp "$ROOT/secrets/' in script
-    assert 'mv "$temp" "$target"' in script
+    assert 'ln "$temp" "$target"' in script
+    assert 'mv "$temp" "$target"' not in script
     assert 'chmod 0600 "$temp"' in script
 
 

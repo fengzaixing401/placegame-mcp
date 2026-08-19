@@ -21,7 +21,12 @@ write_atomic() {
     rm -f "$temp"
     return 1
   fi
-  mv "$temp" "$target"
+  if ln "$temp" "$target"; then
+    rm -f "$temp"
+    return 0
+  fi
+  rm -f "$temp"
+  [ -e "$target" ]
 }
 write_token() { python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")'; }
 write_database_url() {
