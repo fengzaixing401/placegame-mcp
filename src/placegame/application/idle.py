@@ -114,10 +114,12 @@ class IdleExecutionGuard:
     @asynccontextmanager
     async def hold(self, account_id: UUID):
         async with self.sessions() as session:
-            await session.execute(
-                text("SELECT pg_advisory_lock(hashtextextended(:account_id, 2))"),
+            result = await session.execute(
+                text("SELECT pg_try_advisory_lock(hashtextextended(:account_id, 2))"),
                 {"account_id": str(account_id)},
             )
+            if not bool(result.scalar()):
+                raise PlanInProgress() from None
             try:
                 yield
             finally:
@@ -354,7 +356,10 @@ def _audit_actor(actor: Actor) -> tuple[str, str]:
         raise ValueError("actor is required")
     _require_identifier(kind)
     _require_identifier(actor_id)
-    return f"{kind}:{actor_id}", kind
+    value = f"{kind}:{actor_id}"
+    if len(value) > 128:
+        raise ValueError("actor identifier is too long")
+    return value, kind
 
 
 class IdleExecuteUseCase:

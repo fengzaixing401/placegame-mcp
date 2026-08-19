@@ -18,6 +18,16 @@ async def test_health_endpoint_is_available(settings):
     assert response.json() == {"status": "ok"}
 
 
+def test_app_exposes_only_health_routes(settings):
+    routes = {
+        route.path
+        for route in create_app(settings).routes
+        if hasattr(route, "path")
+    }
+
+    assert routes == {"/health/live", "/health/ready"}
+
+
 def test_settings_reads_database_url_from_a_nonempty_secret_file(tmp_path: Path):
     secret_file = tmp_path / "database-url"
     secret_file.write_text("postgresql+asyncpg://secret-host/database\n", encoding="utf-8")

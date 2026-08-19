@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
 from placegame.game.schemas import IdleSummary
 from placegame.policy.models import VersionedPolicy
 
@@ -105,3 +107,51 @@ async def test_idle_plan_use_case_records_wait_without_creating_plan():
     assert result.decision == "wait"
     assert result.plan_id is None
     assert store.drafts == [None]
+
+
+class _AdvisoryResult:
+    def __init__(self, acquired: bool) -> None:
+        self.acquired = acquired
+
+    def scalar(self):
+        return self.acquired
+
+
+class _AdvisorySession:
+    def __init__(self, acquired: bool) -> None:
+        self.acquired = acquired
+        self.unlock_called = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return False
+
+    async def execute(self, statement, params=None):
+        if "try_advisory_lock" in str(statement):
+            return _AdvisoryResult(self.acquired)
+        self.unlock_called = True
+        return _AdvisoryResult(True)
+
+    async def commit(self):
+        return None
+
+
+class _AdvisorySessions:
+    def __init__(self, acquired: bool) -> None:
+        self.session = _AdvisorySession(acquired)
+
+    def __call__(self):
+        return self.session
+
+
+async def test_idle_execution_guard_reports_busy_account_without_waiting():
+    from placegame.application.errors import PlanInProgress
+    from placegame.application.idle import IdleExecutionGuard
+
+    sessions = _AdvisorySessions(False)
+    with pytest.raises(PlanInProgress, match="plan_in_progress"):
+        async with IdleExecutionGuard(sessions).hold(uuid4()):
+            raise AssertionError("busy account must not enter the guarded body")
+    assert sessions.session.unlock_called is False

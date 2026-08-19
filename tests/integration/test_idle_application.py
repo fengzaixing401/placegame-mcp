@@ -13,6 +13,8 @@ from placegame.application.idle import (
     IdlePreviewStore,
 )
 from placegame.contracts import Actor
+from placegame.errors import PlanPreconditionFailed
+from placegame.models import ActionPlan
 from tests.unit.test_accounts import ServiceEnvironment
 
 
@@ -97,4 +99,48 @@ async def test_expired_execution_claim_recovers_without_sending_again(idle_env):
         await executor.execute(
             account.id, preview.plan_id, actor=OPERATOR, correlation_id="recover-alpha", recovery=True
         )
+    assert idle_env.fake.mutation_count("idle_collect", account.id) == 0
+
+
+async def test_ambiguous_collect_reconciles_without_a_second_send(idle_env):
+    account, _ = await idle_env.add_token("alpha")
+    idle_env.fake.set_idle_seconds(account.id, 7200)
+    preview = await IdlePlanUseCase(
+        idle_env.service,
+        IdlePreviewStore(idle_env.sessions, idle_env.service.repository),
+        clock=idle_env.clock,
+    ).preview(account.id, actor=OPERATOR, correlation_id="preview-ambiguous")
+    assert preview.plan_id is not None
+    idle_env.fake.commit_then_timeout("idle_collect", account.id)
+
+    result = await IdleExecuteUseCase(
+        idle_env.service,
+        IdleExecutionGuard(idle_env.sessions),
+        IdleExecutionClaims(idle_env.sessions, idle_env.service.repository, clock=idle_env.clock),
+    ).execute(account.id, preview.plan_id, actor=OPERATOR, correlation_id="execute-ambiguous")
+
+    assert result.status == "reconciled"
+    assert idle_env.fake.mutation_count("idle_collect", account.id) == 1
+
+
+async def test_high_risk_plan_is_rejected_without_mutation(idle_env):
+    account, _ = await idle_env.add_token("alpha")
+    idle_env.fake.set_idle_seconds(account.id, 7200)
+    preview = await IdlePlanUseCase(
+        idle_env.service,
+        IdlePreviewStore(idle_env.sessions, idle_env.service.repository),
+        clock=idle_env.clock,
+    ).preview(account.id, actor=OPERATOR, correlation_id="preview-high-risk")
+    assert preview.plan_id is not None
+    async with idle_env.sessions.begin() as session:
+        plan = await session.get(ActionPlan, preview.plan_id)
+        assert plan is not None
+        plan.risk = "high"
+
+    with pytest.raises(PlanPreconditionFailed):
+        await IdleExecuteUseCase(
+            idle_env.service,
+            IdleExecutionGuard(idle_env.sessions),
+            IdleExecutionClaims(idle_env.sessions, idle_env.service.repository, clock=idle_env.clock),
+        ).execute(account.id, preview.plan_id, actor=OPERATOR, correlation_id="execute-high-risk")
     assert idle_env.fake.mutation_count("idle_collect", account.id) == 0
