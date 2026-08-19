@@ -1,260 +1,290 @@
-# PlaceGame Reboot and Idle Vertical Slice Design
+# PlaceGame Single-Operator Automation and Idle Slice Design
 
 **Date:** 2026-08-19
 
-**Status:** Approved by recommended-default authorization
+**Status:** Approved after single-operator server scope reduction
 
-**Supersedes for execution order:** the task ordering in the 2026-08-17 MCP core, WebUI, and inventory plans. Those documents remain domain references, not the active implementation sequence.
+**Supersedes for execution order:** the 2026-08-17 core, WebUI, inventory,
+and deployment plans. Those documents remain domain references only.
 
-## 1. Decision
+## 1. Product Boundary
 
-Keep the proven parts of `feat/placegame-automation`, but stop expanding horizontal domain coverage. The product will be delivered as a sequence of complete vertical slices. The first slice is:
+PlaceGame MCP is a server-hosted tool for one operator who controls multiple
+game accounts. It runs as a Docker container and does not have product users,
+tenants, roles, or multiple administrators.
+
+The product will be delivered as complete vertical slices. The first slice is:
 
 ```text
-account status -> idle preview -> idle collect
+account list -> account status -> idle preview -> idle collect
 ```
 
-The slice must be usable from both MCP and a small WebUI before boss, profession, reward, or inventory automation grows further.
+The shared backend is implemented first. A remotely accessible Streamable HTTP
+MCP adapter and the WebUI consume that backend later, in that order.
 
-The current uncommitted worktree is user-owned work in progress. It must not be reset, overwritten, or treated as a clean release baseline. P0-P1 implementation starts in a new clean worktree and branch from the final documentation commit. The dirty Task 5C experiment remains untouched in its original worktree.
+The original `placegame-automation` worktree contains user-owned Task 5C WIP.
+It remains untouched. P0-P1 work occurs only in the clean sibling worktree
+`placegame-idle-v1` on branch `feat/placegame-idle-v1`.
 
-## 2. Product Goal
+## 2. Goals
 
-Build a game automation service that:
+- Manage multiple independent PlaceGame accounts for one operator.
+- Expose fixed, typed tools to an agent through Streamable HTTP MCP.
+- Provide a small WebUI for manual control through the same FastAPI service.
+- Run scheduled automation on the server when no agent is connected.
+- Build a deployable container image in GitHub Actions without pushing or
+  deploying it in P0-P1.
+- Send game operations only through fixed, typed PlaceGame HTTP methods.
+- Reuse one application layer for MCP, WebUI, and scheduler calls.
+- Prevent one account's credentials, state, plans, and mutations from being
+  used for another account.
+- Prevent duplicate idle collection when local callers race, a request times
+  out, or the process exits after the game accepted a mutation.
 
-- exposes fixed, typed MCP tools so an agent can connect at any time;
-- provides a WebUI for direct human control and inspection;
-- continues scheduled automation when no agent is connected;
-- sends game operations only through typed PlaceGame HTTP API methods;
-- applies the same authorization, policy, plan, execution, reconciliation, and audit rules to every caller.
+## 3. Non-Goals
 
-The first usable milestone proves this architecture with account status and idle reward collection.
+The service does not implement:
 
-## 3. Scope
+- user registration, multiple administrators, RBAC, per-user scopes, 2FA,
+  recovery codes, or multi-tenant identity;
+- application-managed TLS, domain management, reverse-proxy configuration, or
+  automated server deployment;
+- generic caller-supplied URLs, methods, headers, or request bodies;
+- browser, DOM, Playwright, or image-driven control of the game website;
+- boss, profession, reward, inventory, or scheduler behavior in P0-P1.
 
-### First milestone
-
-- Preserve and reuse existing account enrollment, secret encryption, account locks, session renewal, typed game client, versioned policy, action-plan lifecycle, reconciliation, and audit storage where they satisfy this design.
-- Add a shared application layer for account status, idle preview, and idle execution.
-- Expose the shared use cases through Streamable HTTP MCP.
-- Expose the same use cases through a loopback-only WebUI and versioned admin API.
-- Add persistent idle scheduling only after manual MCP and WebUI flows pass.
-- Keep all responses sanitized and correlated with an audit identifier.
-
-### Explicitly deferred
-
-- Boss, profession, safe reward, and inventory expansion.
-- Public Internet deployment and public administrator authentication.
-- Full dashboard, SSE, TOTP, recovery codes, external notifications, and multi-user tenancy.
-- Browser, DOM, Playwright, or image-driven control of the game website.
-- Generic URL, HTTP method, headers, or body supplied by an MCP or WebUI caller.
+The later WebUI uses one administrator secret to create a server-side session.
+The later MCP endpoint uses one Bearer token. Both values come only from
+environment variables or container secrets. P0-P1 does not add RBAC, 2FA, a
+user database, or a general token-management subsystem.
 
 ## 4. Architecture
 
-Use a Python 3.12 modular monolith with FastAPI, the Python MCP SDK, SQLAlchemy/PostgreSQL, and a React/TypeScript WebUI.
+Use the existing Python 3.12 modular monolith, FastAPI application core,
+SQLAlchemy/PostgreSQL persistence, typed HTTP client, and React/TypeScript
+frontend direction.
 
 ```text
-Agent -- Streamable HTTP MCP --\
-                                \
-Browser -- Admin JSON API -------+--> Application use cases
-                                  |      |-- AccountStatusQuery
-Scheduler ------------------------/      |-- IdlePlanUseCase
-                                         `-- IdleExecuteUseCase
-                                                   |
-                                             account lock
-                                                   |
-                                         authoritative game read
-                                                   |
-                                          policy + typed plan
-                                                   |
-                                         typed GameApi mutation
-                                                   |
-                                         reconcile + verify + audit
+Agent -- Streamable HTTP MCP ------\
+                                    +--> shared application use cases
+Browser -- WebUI/admin API --------/       |-- AccountStatusQuery
+Scheduler -- server process -------/       |-- IdlePlanUseCase
+                                            `-- IdleExecuteUseCase
+                                                      |
+                                                account isolation
+                                                      |
+                                           authoritative game state
+                                                      |
+                                             policy + typed plan
+                                                      |
+                                            typed GameApi mutation
+                                                      |
+                                             reconcile + audit
 ```
 
-Transport adapters contain authentication, input validation, error mapping, and response serialization only. They do not implement game rules. The WebUI never calls PlaceGame directly and does not use MCP as its internal API.
+Transport adapters validate and serialize requests. They do not contain
+game rules. The WebUI never calls PlaceGame directly and does not use MCP as
+its internal API.
 
-## 5. Module Boundaries
+### Shared backend
 
-### Composition root
+`placegame.application` owns transport-independent use cases and strict result
+models. It accepts an explicit `account_id` for every account-specific action.
 
-`placegame.app` owns application startup and shutdown. It creates the database engine/session factory, game-client factory, repositories, policy and plan stores, account service, application use cases, MCP adapter, and admin routes. It disposes owned resources during shutdown and exposes liveness and readiness separately.
+`placegame.app` owns database and HTTP client startup/shutdown, constructs the
+repositories and use cases, and exposes liveness/readiness for the server
+application. P0-P1 adds no MCP or WebUI product routes.
 
-### Application layer
+### MCP
 
-Add focused modules under `placegame.application`:
+After P1, P2 mounts Streamable HTTP MCP in the FastAPI service. It uses one
+Bearer token from an environment variable or container secret and has no RBAC,
+scope matrix, or account allowlist. Its initial tools are `accounts_list`,
+`account_status`, `idle_preview`, and `idle_collect`. Stdio may remain an
+optional development adapter but is not the deployment transport.
 
-- `status.py`: list sanitized accounts and return an authoritative status projection for one allowed account.
-- `idle.py`: create an idle plan, execute a still-valid plan, and return a stable result.
-- `errors.py`: stable application error codes and correlation metadata without transport-specific response classes.
+### WebUI
 
-The application layer orchestrates existing account, policy, plan, game, and audit boundaries. It does not accept raw credentials, raw endpoint paths, or untyped dictionaries from transports.
+After MCP, P3 adds a compact work console and JSON API to the same FastAPI
+service. One administrator secret creates a server-side WebUI session. There
+is no registration, RBAC, or 2FA. The container listens on `0.0.0.0`; TLS and
+the public domain belong to an external reverse proxy.
 
-### Existing core
+## 5. Direct Correctness Boundaries
 
-Retain the current crypto, secret framing, account advisory locking, session renewal, strict game schemas, policy versions, plan state machine, timeout reconciliation, and multi-account isolation. Do not extend the 1,260-line `AccountService` with transport or idle-specific behavior. New orchestration belongs in the application layer.
+### Multi-account isolation
 
-The dirty Task 5C `object + getattr + cast` state-source experiment is deferred with the boss, profession, and reward work. It is not copied into P0-P1. New P0-P1 ports are fully typed and production Pyright must report zero errors.
+- Credentials and sessions remain stored per internal account UUID.
+- Every state read, plan, execution claim, mutation, and audit record carries
+  its account UUID.
+- Account advisory locks serialize mutations for the same account while
+  allowing different accounts to progress independently.
+- A plan created for account A cannot execute against account B.
+- Listing never exposes stored credentials or session tokens.
 
-### Transport layer
+### Sensitive data handling
 
-The MCP adapter exposes only:
+- Passwords, session tokens, authorization headers, and raw upstream bodies do
+  not enter logs, error messages, fixtures, or audit payloads.
+- Administrator and MCP secrets exist only in runtime environment variables or
+  mounted container secrets. They are not baked into images or CI logs.
+- Existing secret encryption remains in use; P0-P1 does not broaden it.
+- Correlation IDs and local actor labels are bounded, non-secret identifiers.
 
-- `accounts_list()`
-- `account_status(account_id)`
-- `idle_preview(account_id)`
-- `idle_collect(account_id, plan_id)`
-- `automation_status(account_id)` after idle scheduling exists
+### Fixed game boundary
 
-The initial admin API exposes equivalent versioned routes under `/api/admin/v1`. The first WebUI is a work console, not a marketing or setup site.
+- Only registered typed `GameApi` methods may contact PlaceGame.
+- Schema mismatch stops the affected operation.
+- Synthetic contract fixtures are marked synthetic and are not represented as
+  live evidence.
+- Live `idle_collect` exposure remains blocked until an opt-in, credentialed
+  response capture is redacted and reviewed.
 
 ## 6. Shared Contracts
 
-Application responses are strict models. Minimum fields are:
+Minimum application results are:
 
 ```text
-AccountSummary: account_id, label, enabled, paused_reason, authenticated
+AccountSummary: account_id, label, enabled, paused_reason, auth_state
 AccountStatus: account, bootstrap identity, idle summary, fetched_at
 IdlePreview: optional plan_id, decision, accumulated_seconds, capacity_seconds,
              threshold_seconds, expires_at, reason, correlation_id
-IdleExecution: plan_id, status, applied, reconciled, collected summary,
-               correlation_id
+IdleExecution: plan_id, status, applied, reconciled, collected, correlation_id
 ```
 
-`decision` is `collect` or `wait`. A `wait` preview has no plan ID and cannot be executed. A mutation accepts a server-issued plan ID, not caller-authored action data. Every account selector in the first slice is exactly one account ID; batch selection is deferred.
+List `auth_state` is `required` or `unknown`; only an authoritative status read
+may return `authenticated`. A `wait` preview has no plan ID. A mutation accepts
+only a server-issued plan ID, never caller-authored action data. Batch mutation
+is deferred; the first slice executes one account at a time.
 
-## 7. Idle Data Flow
+## 7. Idle Flow
 
 ### Preview
 
-1. Authenticate the transport caller and authorize the account.
-2. Acquire the account service's read/mutation-safe context.
-3. Renew the game session if required.
-4. Read authoritative bootstrap/status and idle summary.
-5. Load the current versioned policy.
-6. Decide `collect` or `wait` using the lower of the configured threshold and server capacity.
-7. Atomically persist a typed, expiring action plan and its `idle.preview` audit when the decision is `collect`. The plan contains policy version and a canonical idle eligibility fingerprint. The fingerprint contains server capacity and whether the threshold is currently satisfied; it does not contain the exact accumulated second, which naturally changes with time.
-8. For a `wait` decision, persist only the audit in the same typed persistence boundary.
-9. Return a sanitized preview whose correlation ID matches the audit.
+1. Enter the selected account's locked context and renew its game session if
+   required.
+2. Read authoritative bootstrap and idle summary data.
+3. Load the account's versioned policy.
+4. Decide `collect` or `wait` using the lower of the configured threshold and
+   server capacity.
+5. For `collect`, atomically persist one low-risk, no-confirmation
+   `IdleCollectAction` plan and its audit record.
+6. For `wait`, persist only the audit through the same typed boundary.
+7. Return the result with the same correlation ID as the audit.
+
+The eligibility fingerprint contains server capacity and the eligible boolean,
+not the exact accumulated second. Natural accumulation after the threshold
+therefore does not invalidate the plan; an external collection does.
 
 ### Execute
 
-1. Authenticate and authorize the caller and account.
-2. Acquire a PostgreSQL session-level execution guard in a namespace separate from the normal account transaction lock. Hold it until the attempt is terminalized or the process connection closes.
-3. In a short committed transaction, load the referenced plan and verify ownership, pending/confirmed state, expiry, low risk, no confirmation requirement, and the exact single `IdleCollectAction` shape. Persist `execution_state=executing`, a random owner, attempt count, start time, and a two-minute lease expiry before any game mutation can be sent.
-4. Acquire the normal account mutation lock, re-read policy and authoritative idle state, and require the same execution owner.
-5. Reject stale policy, changed server capacity, or a no-longer-eligible idle state without sending a mutation. Natural accumulation while eligibility remains true does not invalidate the plan.
-6. Call only `GameApi.idle_collect()`.
-7. Verify that accumulated idle time reset or decreased as expected.
-8. On a post-send timeout, reconcile from authoritative state and never blindly retry.
-9. Terminalize the plan and persist a sanitized audit result in the mutation transaction, then release the execution guard.
-10. If the process exits after the claim commit, the claim remains `executing` while the session-level guard is released automatically by PostgreSQL. A later caller that acquires the guard must perform authoritative reconciliation only; it must never resend the mutation. If the result cannot be proven, mark `reconciliation_required`.
+1. Acquire the seed-2 PostgreSQL session execution guard for the account.
+2. In a short committed transaction, verify plan ownership, state, expiry,
+   policy version, exact single idle action, low risk, and no confirmation.
+3. Persist an `executing` claim with owner, attempt count, start time, and a
+   two-minute lease before sending the game mutation.
+4. Under the normal account lock, re-read policy and authoritative idle state,
+   and require the same execution owner and eligibility fingerprint.
+5. Call only `GameApi.idle_collect()` and verify that accumulated time reset or
+   decreased.
+6. Terminalize the claim and audit under the same account mutation
+   transaction.
 
-An active holder prevents a second executor from claiming, reconciling, or terminalizing while the first request is still in flight. Even if the session guard connection disappears, a second caller treats an unexpired execution lease as `plan_in_progress`. Recovery requires both successful guard acquisition and an expired lease. The lease never permits bypassing the session-level guard.
+An active guard prevents concurrent execution. An unexpired claim
+returns `plan_in_progress`. If the process exits after claim commit, recovery
+waits for the lease, acquires the guard, reads authoritative state, and either
+marks the plan reconciled or `reconciliation_required`. Recovery never sends
+`idle_collect`, even when the state is still eligible.
 
-## 8. Error Model
+## 8. Errors
 
-Stable application error codes include:
+Application errors use stable local codes such as:
 
 - `account_not_found`
 - `account_disabled`
 - `account_paused`
 - `authentication_required`
-- `forbidden_account`
-- `plan_not_found`
 - `plan_not_executable`
 - `plan_in_progress`
-- `plan_expired`
-- `plan_stale`
 - `game_contract_changed`
 - `game_temporarily_unavailable`
 - `mutation_reconciliation_required`
+- `unauthorized`
 - `internal_error`
 
-MCP returns structured tool errors; the admin API maps the same errors to appropriate HTTP status codes. Neither surface includes Python traces, credentials, bearer tokens, raw upstream bodies, or verifier exception text.
+Errors do not include credentials, tokens, raw game responses, or Python
+traces. No remote authorization errors are needed.
 
-Schema mismatch stops the affected operation. Ambiguous post-send outcomes are reconciled once and never automatically repeated. The account is paused only when the existing account/session safety policy requires it.
+## 9. Testing
 
-## 9. Security
+- Fast tests do not require Docker or PostgreSQL.
+- PostgreSQL tests are marked `integration` and skip clearly when neither an
+  explicit database nor Docker is available.
+- Windows development installs `tzdata`; `ZoneInfo("Asia/Shanghai")` must work
+  during collection and execution.
+- The Docker image has a healthcheck against `/health/live`, runs the service
+  on `0.0.0.0`, and contains no repository or runtime secrets.
+- GitHub Actions builds the image and performs a container health smoke test;
+  it does not push or deploy the image in P0-P1.
+- Fake game tests cover status, wait/collect decisions, session rejection,
+  schema mismatch, account isolation, timeout reconciliation, racing
+  callers, and process exit after mutation commit.
+- Contract fixtures include synthetic provenance and pass recursive redaction.
+- Production Python source passes Pyright with zero errors.
 
-- MCP tokens are random high-entropy bearer tokens stored as hashes, with scopes and an account allowlist.
-- The first WebUI runs on loopback only and uses a development administrator credential or session boundary. It must refuse a non-loopback bind until production authentication is implemented.
-- All audit structured fields, including `before`, `after`, `costs`, and `result`, pass through centralized redaction at the repository or persistence boundary.
-- Logs and error responses contain correlation IDs but no secrets.
-- There is no generic proxy or arbitrary operation tool.
+## 10. Delivery Order
 
-## 10. Testing and Verification
+### P0: Development and image baseline
 
-Tests are divided into fast and environment-dependent gates:
+Create a deterministic Windows-friendly baseline: preserve worktree isolation,
+add `tzdata`, separate fast and integration tests, restore production Pyright,
+record the synthetic/live contract status, and add the Docker/CI build smoke
+baseline.
 
-- Pure unit tests do not require Docker or PostgreSQL.
-- PostgreSQL tests are marked `integration` and skip with a clear reason when no explicit test database or Docker runtime is available.
-- A fake game server covers status, idle threshold, collection, session rejection, schema mismatch, conflict, and commit-then-timeout reconciliation.
-- Synthetic contract fixtures are redacted, versioned, and validated against strict schemas. They carry provenance and are not represented as live-verified responses.
-- MCP protocol tests cover initialize, tool listing, successful calls, scopes, account allowlists, malformed input, and secret leakage.
-- Admin API and WebUI tests cover the same preview and execute behavior.
-- Playwright checks the WebUI at desktop and mobile widths for rendering, focus, loading, error, and success states.
-- Production Python source must pass Pyright with zero errors.
+### P1: Shared idle backend
 
-The standard gate must not report Docker absence as hundreds of test errors. It must either run integration tests or skip them explicitly.
+Implement account status, atomic idle preview, crash-safe idle execution,
+multi-account isolation, and the application composition root. P1 exposes no
+MCP or WebUI product surface.
 
-## 11. Delivery Phases
+### Later milestones
 
-### P0: Baseline and contract gate
+1. P2: Streamable HTTP MCP with one Bearer token.
+2. P3: WebUI with one administrator secret and server-side session.
+3. P4: server-side idle scheduler.
+4. P5: one complete game capability slice at a time.
 
-- Preserve the dirty worktree and record its relation to commit `97047c3`.
-- Establish fast-unit and explicit-integration test markers.
-- Restore production Pyright to zero.
-- Validate synthetic status and idle API fixtures, record their provenance, and mark the live PlaceGame contract `live_contract_unverified` until an opt-in credentialed capture is redacted and reviewed. P2 cannot expose a real mutation while this gate remains unverified.
+The image listens on `0.0.0.0`. Server rollout, DNS, TLS, and reverse-proxy
+configuration remain operator-managed outside P0-P1.
 
-### P1: Shared backend idle slice
+## 11. P0-P1 Acceptance
 
-- Implement the application contracts and use cases.
-- Prove fresh-state planning, guarded execution, reconciliation, audit redaction, and two-account isolation.
-- Add composition-root lifespan and readiness.
+- The tool is explicitly single-operator and supports multiple isolated game
+  accounts.
+- The original dirty worktree is unchanged.
+- Windows can construct `ZoneInfo("Asia/Shanghai")`, and test collection does
+  not fail because timezone data is missing.
+- GitHub Actions can build the Docker image and verify its healthcheck without
+  pushing or deploying it.
+- A fake account can return status, preview wait/collect, and execute one valid
+  idle plan.
+- Stale, expired, cross-account, disabled, paused, or malformed plans send no
+  mutation.
+- Timeout, racing calls, and process-exit recovery never send a duplicate idle
+  mutation.
+- Credentials and session tokens are absent from logs, errors, fixtures, and
+  audit payloads.
+- Fast tests run without Docker; integration tests run or skip explicitly;
+  production Pyright is clean.
+- P0-P1 contains no MCP adapter, WebUI, scheduler, RBAC, 2FA, or deployment
+  automation beyond building and smoke-testing the image.
 
-### P2: MCP slice
+## 12. Agent Handoff
 
-- Add scoped MCP token authentication and account allowlists.
-- Publish the four initial typed tools over Streamable HTTP.
-- Pass MCP protocol and leakage tests.
-
-### P3: Loopback WebUI slice
-
-- Build a compact account work console with account selection, status, idle countdown, preview, explicit collect action, and verified result.
-- Use the same application use cases through `/api/admin/v1`.
-- Pass component, API, desktop, and mobile checks.
-
-### P4: Idle automation
-
-- Add persistent Beijing-time jobs, one scheduler lease holder, idempotency, misfire recovery, pause/resume, run-now, and job history.
-- Prove two schedulers cannot duplicate a collection.
-
-### P5: Capability expansion
-
-Add one complete vertical slice at a time in this order: personal/map bosses, world boss, professions, safe rewards, inventory. Each slice requires a verified fixture, typed game client method, shared use case, MCP tool, WebUI control, scheduler hook when applicable, and focused tests. Inventory destructive behavior remains last and plan-confirmed.
-
-### P6: Production publication
-
-Add administrator password, TOTP and recovery codes, CSRF protection, rate limits, Caddy/TLS, backups, restore testing, observability, and production Compose. The P3 loopback credential is removed before public binding is possible.
-
-## 12. Acceptance Criteria for P0-P1
-
-- Existing user WIP is preserved and the implementation baseline is explicit.
-- `AccountStatusQuery`, `IdlePlanUseCase`, and `IdleExecuteUseCase` are transport-independent and fully typed.
-- A fake game account can return status, produce `wait` or `collect`, and execute one valid collect plan.
-- A stale, expired, cross-account, disabled, paused, or non-collect plan sends no game mutation.
-- A commit-then-timeout scenario sends exactly one mutation and returns a reconciled or reconciliation-required result.
-- A game commit followed by process exit before the terminal database commit leaves a durable execution claim; recovery performs only authoritative reconciliation and the mutation count remains exactly one.
-- Two accounts cannot share credentials, state, plans, or mutations.
-- Idle preview plan creation and audit persistence are atomic; audit failure leaves no executable plan.
-- All persisted audit structures are centrally redacted.
-- Fast tests pass without Docker; integration tests are explicit; production Pyright reports zero errors.
-- No MCP, WebUI, scheduler, boss, profession, reward, or inventory scope is smuggled into the P0-P1 implementation task.
-
-## 13. Agent Handoff
-
-- `gpt-5.6-sol` owns this design, task planning, architectural decisions, and read-only review.
-- `gpt-5.6-terra` owns P0-P1 implementation using TDD and the smallest changes that meet the acceptance criteria.
-- The implementation handoff must include the diff, commands run, exact results, and unresolved concerns.
-- sol review ends with `Approved` or one finite Critical/Important fix list. A maximum of two repair cycles is allowed for the same root cause.
+- `gpt-5.6-sol` owns planning and read-only milestone review.
+- `gpt-5.6-terra` or Luna implements P0 and P1.
+- Terra runs one relevant verification gate at the end of each milestone.
+- Sol reviews only after P0 and P1 completion, not after internal task steps.
+- Each milestone allows at most one focused fix and one focused re-review.
+- A handoff includes the diff/commit, exact commands and results, skipped
+  integration reason if any, and unresolved contract evidence.
