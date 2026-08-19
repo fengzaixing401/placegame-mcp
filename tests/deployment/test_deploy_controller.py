@@ -47,6 +47,15 @@ def test_deploy_pulls_app_and_migrate_images(tmp_path) -> None:
     assert any(command[-3:] == ("pull", "app", "migrate") for command in runner.commands)
 
 
+def test_success_promotes_candidate_to_current_env(tmp_path) -> None:
+    runner = RecordingRunner()
+    Deployer(runner=runner, root=tmp_path, health_probe=lambda _url: True).deploy("sha256:" + "b" * 64)
+    assert not (tmp_path / "state/candidate.env").exists()
+    assert (tmp_path / "current.env").read_text(encoding="ascii") == (
+        "PLACEGAME_IMAGE=" + IMAGE_REPOSITORY + "@sha256:" + "b" * 64 + "\n"
+    )
+
+
 @pytest.mark.parametrize(
     "contents",
     [
@@ -77,7 +86,26 @@ def test_health_failure_restores_prior_app_only(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="health"):
         Deployer(runner=runner, root=tmp_path, health_probe=lambda _url: False, health_attempts=2).deploy("sha256:" + "2" * 64)
     assert (tmp_path / "current.env").read_text(encoding="ascii").endswith("1" * 64 + "\n")
+    assert any(command[-2:] == ("pull", "app") for command in runner.commands)
+    assert any(command[-4:] == ("up", "-d", "--no-deps", "app") for command in runner.commands)
     assert not any("down" in command for command in runner.commands)
+
+
+def test_rollback_up_runs_when_rollback_pull_fails(tmp_path) -> None:
+    write_current(tmp_path, IMAGE_REPOSITORY + "@sha256:" + "1" * 64)
+
+    class RollbackPullFailingRunner(RecordingRunner):
+        def run(self, argv: tuple[str, ...]) -> None:
+            self.commands.append(argv)
+            if str(tmp_path / "current.env") in argv and argv[-2:] == ("pull", "app"):
+                raise RuntimeError("rollback pull failed")
+
+    runner = RollbackPullFailingRunner()
+    with pytest.raises(RuntimeError) as exc_info:
+        Deployer(runner=runner, root=tmp_path, health_probe=lambda _url: False, health_attempts=1).deploy("sha256:" + "2" * 64)
+    assert str(exc_info.value) == "health check failed"
+    assert any(command[-2:] == ("pull", "app") for command in runner.commands)
+    assert any(command[-4:] == ("up", "-d", "--no-deps", "app") for command in runner.commands)
 
 
 def test_first_deploy_health_failure_stops_only_app(tmp_path) -> None:

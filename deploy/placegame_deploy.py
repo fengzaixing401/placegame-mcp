@@ -1,3 +1,4 @@
+import logging
 import re
 import subprocess
 import sys
@@ -11,6 +12,7 @@ IMAGE_REPOSITORY = "ghcr.io/fengzaixing401/placegame-mcp"
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z", re.ASCII)
 INSTALL_ROOT = Path("/opt/placegame-mcp")
 PROJECT_NAME = "placegame-mcp"
+logger = logging.getLogger(__name__)
 
 
 def validate_digest(value: str) -> str:
@@ -104,15 +106,22 @@ class Deployer:
                 if live and ready:
                     if prior:
                         self._write(self.root / "state/previous-image", prior + "\n")
-                    self._write(self.root / "current.env", f"PLACEGAME_IMAGE={image}\n")
+                    candidate.replace(self.root / "current.env")
                     return
                 if attempt + 1 < self.health_attempts:
                     time.sleep(2)
             raise RuntimeError("health check failed")
         except Exception:
             if prior:
-                self.runner.run(self._compose(self.root / "current.env", "pull", "app"))
-                self.runner.run(self._compose(self.root / "current.env", "up", "-d", "--no-deps", "app"))
+                rollback_env = self.root / "current.env"
+                for step, args in (
+                    ("pull", ("pull", "app")),
+                    ("up", ("up", "-d", "--no-deps", "app")),
+                ):
+                    try:
+                        self.runner.run(self._compose(rollback_env, *args))
+                    except Exception:
+                        logger.error("deployment_rollback_failed", extra={"rollback_step": step})
             else:
                 self.runner.run(self._compose(candidate, "stop", "app"))
             raise
