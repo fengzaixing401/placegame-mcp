@@ -15,6 +15,12 @@ from tests.fakes.game_server import FakeGameServer
 TEST_MASTER_KEY_B64 = base64.b64encode(bytes(range(32))).decode("ascii")
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if "postgres_url" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.integration)
+
+
 @pytest.fixture
 def fake_game():
     with FakeGameServer() as server:
