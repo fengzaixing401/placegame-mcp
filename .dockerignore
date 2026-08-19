@@ -1,5 +1,6 @@
 .git
 .worktrees
+.superpowers
 .venv
 **/.venv
 __pycache__
@@ -17,6 +18,9 @@ docs
 .env
 .env.*
 !.env.example
+deploy/current.env
+deploy/state
+deploy/secrets
 *.pem
 *.key
 *.crt
