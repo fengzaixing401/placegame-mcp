@@ -18,6 +18,9 @@ from placegame.models import (
 from tests.unit.test_accounts import ADMIN, SCHEDULER, ServiceEnvironment
 
 
+pytestmark = pytest.mark.integration
+
+
 @pytest.fixture
 def isolation_database_url(postgres_url, alembic_config):
     command.upgrade(alembic_config(postgres_url), "head")

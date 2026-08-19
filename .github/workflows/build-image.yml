@@ -1,0 +1,30 @@
+name: Build image
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  build-and-healthcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t placegame-mcp:ci .
+      - name: Start and wait for healthcheck
+        shell: bash
+        run: |
+          master_key="$(openssl rand -base64 32)"
+          docker run --detach --name placegame-p0 --env PLACEGAME_MASTER_KEY_B64="$master_key" placegame-mcp:ci
+          for attempt in {1..30}; do
+            status="$(docker inspect --format='{{.State.Health.Status}}' placegame-p0)"
+            if [ "$status" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs placegame-p0
+          exit 1
+      - name: Remove container
+        if: always()
+        run: docker rm --force placegame-p0 || true

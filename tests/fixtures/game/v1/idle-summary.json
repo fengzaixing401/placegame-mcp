@@ -1,0 +1,13 @@
+{
+  "provenance": "synthetic",
+  "endpoint": "/api/client/idle/summary",
+  "created_at": "2026-08-19T00:00:00Z",
+  "verified_at": null,
+  "game_contract_version": "unverified",
+  "redaction_method": "placegame.security.redaction.redact",
+  "live_contract_status": "unverified",
+  "data": {
+    "accumulatedSeconds": 0,
+    "capacitySeconds": 1
+  }
+}

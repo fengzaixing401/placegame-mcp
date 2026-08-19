@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     @classmethod
     def from_env(cls) -> "Settings":
-        return cls()
+        return cls.model_validate({})
 
     def read_database_url(self) -> str:
         if self.database_url_file is None:

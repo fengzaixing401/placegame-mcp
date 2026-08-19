@@ -7,6 +7,7 @@ dependencies = [
   "pydantic-settings>=2.4,<3", "sqlalchemy[asyncio]>=2.0.36,<3", "asyncpg>=0.30,<1",
   "alembic>=1.14,<2", "httpx>=0.27,<1", "cryptography>=43,<45",
   "argon2-cffi>=23.1,<26", "pyotp>=2.9,<3", "mcp>=1.12,<2", "structlog>=24,<26",
+  "tzdata>=2025.2,<2027",
 ]
 
 [dependency-groups]
@@ -22,6 +23,9 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "integration: tests that require PostgreSQL through PLACEGAME_TEST_DATABASE_URL or Docker",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

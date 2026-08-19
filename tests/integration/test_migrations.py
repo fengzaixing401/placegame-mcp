@@ -20,6 +20,9 @@ from tests.fakes.game_server import FakeGameApiFactory
 from tests.unit.test_accounts import MutableClock, StubPolicyProvider
 
 
+pytestmark = pytest.mark.integration
+
+
 ADMIN = Actor("webui", "admin")
 
 

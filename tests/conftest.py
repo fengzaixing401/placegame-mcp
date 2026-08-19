@@ -1,5 +1,7 @@
 import base64
 import os
+import shutil
+import subprocess
 
 from collections.abc import Iterator
 
@@ -42,10 +44,31 @@ def postgres_url() -> Iterator[str]:
         yield explicit_url
         return
 
+    if not _docker_available():
+        pytest.skip(
+            "integration tests require PLACEGAME_TEST_DATABASE_URL or a running Docker daemon"
+        )
+
     from testcontainers.postgres import PostgresContainer
 
     with PostgresContainer("postgres:16-alpine") as postgres:
         yield postgres.get_connection_url().replace("postgresql://", "postgresql+asyncpg://", 1)
+
+
+def _docker_available() -> bool:
+    docker = shutil.which("docker")
+    if docker is None:
+        return False
+    try:
+        return subprocess.run(
+            [docker, "info"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 @pytest.fixture
