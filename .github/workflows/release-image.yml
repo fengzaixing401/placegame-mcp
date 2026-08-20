@@ -69,7 +69,11 @@ jobs:
             if [ "$status" = "healthy" ]; then break; fi
             sleep 2
           done
-          test "$(docker inspect --format='{{.State.Health.Status}}' placegame-release-smoke)" = healthy
+          if [ "$(docker inspect --format='{{.State.Health.Status}}' placegame-release-smoke)" != healthy ]; then
+            docker inspect --format='status={{.State.Status}} health={{.State.Health.Status}}' placegame-release-smoke
+            docker logs placegame-release-smoke
+            exit 1
+          fi
           docker exec -i placegame-release-smoke python - <<'PY'
           import urllib.error
           import urllib.request
