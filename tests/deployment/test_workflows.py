@@ -53,8 +53,10 @@ def test_release_workflow_tags_digest_artifact_and_isolation() -> None:
     assert "image-digest.txt" in source
     assert "linux/arm64" in source
     assert "docker run --platform linux/arm64" in source
+    assert "for attempt in {1..60}; do" in source
     assert "docker logs placegame-release-smoke" in source
     assert "docker inspect --format='status={{.State.Status}} health={{.State.Health.Status}}' placegame-release-smoke" in source
+    assert "docker inspect --format='{{json .State.Health.Log}}' placegame-release-smoke" in source
     assert "docker inspect placegame-release-smoke" not in source
     assert "ssh" not in source.lower()
     assert "onessh" not in source.lower()
