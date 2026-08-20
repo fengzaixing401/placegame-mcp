@@ -17,6 +17,15 @@ def test_image_contains_migration_runtime() -> None:
     assert "WORKDIR /app" in dockerfile
 
 
+def test_image_healthcheck_allows_emulated_arm64_startup() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "HEALTHCHECK --interval=5s --timeout=10s --start-period=10s --retries=12" in dockerfile
+    assert (
+        "urllib.request.urlopen("
+        "'http://127.0.0.1:8000/health/live', timeout=2)"
+    ) in dockerfile
+
+
 def test_compose_has_only_placegame_services_and_ports() -> None:
     model = compose()
     services = model["services"]

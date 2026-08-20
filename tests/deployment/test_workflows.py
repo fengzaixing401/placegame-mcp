@@ -58,6 +58,8 @@ def test_release_workflow_tags_digest_artifact_and_isolation() -> None:
     assert "docker inspect --format='status={{.State.Status}} health={{.State.Health.Status}}' placegame-release-smoke" in source
     assert "docker inspect --format='{{json .State.Health.Log}}' placegame-release-smoke" in source
     assert "docker inspect placegame-release-smoke" not in source
+    assert "--health-timeout" not in source
+    assert "--no-healthcheck" not in source
     assert "ssh" not in source.lower()
     assert "onessh" not in source.lower()
     assert "/opt/" not in source
