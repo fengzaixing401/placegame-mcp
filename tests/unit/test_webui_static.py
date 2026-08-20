@@ -53,9 +53,12 @@ async def test_composed_app_keeps_admin_api_ahead_of_mcp_fallback(settings):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         status = await client.get("/api/admin/v1/auth/status")
+        prefix = await client.get("/api/admin/v1")
         unknown = await client.get("/api/admin/v1/does-not-exist")
 
     assert status.status_code == 200
     assert status.json() == {"setupRequired": True, "authenticated": False}
+    assert prefix.status_code == 404
+    assert prefix.json() == {"error": "not_found"}
     assert unknown.status_code == 404
     assert unknown.json() == {"error": "not_found"}

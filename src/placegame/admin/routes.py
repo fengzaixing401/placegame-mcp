@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -47,6 +49,21 @@ from .dependencies import SESSION_COOKIE_NAME, require_admin
 WEBUI_ACTOR = Actor("webui", "operator", frozenset())
 
 
+class SafeValidationRoute(APIRoute):
+    """Keep request validation failures from echoing submitted secrets."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def safe_handler(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except RequestValidationError:
+                return JSONResponse({"error": "invalid_request"}, status_code=422)
+
+        return safe_handler
+
+
 class PasswordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -77,7 +94,7 @@ _ERROR_CODES: tuple[tuple[type[Exception], str, int], ...] = (
 
 
 def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
-    router = APIRouter(prefix="/api/admin/v1")
+    router = APIRouter(prefix="/api/admin/v1", route_class=SafeValidationRoute)
 
     def auth(request: Request) -> AdminAuthService:
         return request.app.state.admin_auth
@@ -143,11 +160,16 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         except Exception as error:
             return error_response(error)
 
-    @router.get("/auth/status")
-    async def auth_status(request: Request) -> dict[str, bool]:
+    @router.get("/auth/status", response_model=None)
+    async def auth_status(request: Request) -> dict[str, bool] | JSONResponse:
         service = auth(request)
-        setup_required = not await service.is_setup()
+        setup_result = await invoke(service.is_setup)
+        if isinstance(setup_result, JSONResponse):
+            return setup_result
+        setup_required = not setup_result
         session = None if setup_required else await require_admin(request)
+        if isinstance(session, JSONResponse):
+            return session
         return {"setupRequired": setup_required, "authenticated": session is not None}
 
     @router.post("/auth/setup", status_code=201, response_model=None)
@@ -181,7 +203,9 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
 
     @router.post("/auth/logout", status_code=204, response_model=None)
     async def auth_logout(
-        request: Request, response: Response, session: AdminSession | None = Depends(require_admin)
+        request: Request,
+        response: Response,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
     ) -> Response | JSONResponse:
         origin_error = same_origin(request)
         if origin_error is not None:
@@ -189,17 +213,26 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         content_error = require_json(request)
         if content_error is not None:
             return content_error
+        if isinstance(session, JSONResponse):
+            return session
         if session is None:
             return unauthorized()
-        await auth(request).logout(request.cookies.get(SESSION_COOKIE_NAME))
+        result = await invoke(
+            lambda: auth(request).logout(request.cookies.get(SESSION_COOKIE_NAME))
+        )
+        if isinstance(result, JSONResponse):
+            return result
         clear_session_cookie(response)
         response.status_code = 204
         return response
 
     @router.get("/accounts", response_model=None)
     async def accounts_list(
-        request: Request, session: AdminSession | None = Depends(require_admin)
+        request: Request,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
     ) -> Any:
+        if isinstance(session, JSONResponse):
+            return session
         if session is None:
             return unauthorized()
         result = await invoke(lambda: request.app.state.account_status_query.list())
@@ -211,8 +244,10 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
     async def account_status(
         account_id: UUID,
         request: Request,
-        session: AdminSession | None = Depends(require_admin),
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
     ) -> Any:
+        if isinstance(session, JSONResponse):
+            return session
         if session is None:
             return unauthorized()
         result = await invoke(
@@ -228,8 +263,10 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
     async def idle_preview(
         account_id: UUID,
         request: Request,
-        session: AdminSession | None = Depends(require_admin),
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
     ) -> Any:
+        if isinstance(session, JSONResponse):
+            return session
         if session is None:
             return unauthorized()
         correlation_id = uuid4().hex
@@ -241,6 +278,14 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         if isinstance(result, JSONResponse):
             return result
         return result.model_dump(mode="json", by_alias=True)
+
+    @router.api_route(
+        "",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        include_in_schema=False,
+    )
+    async def admin_prefix_not_found() -> JSONResponse:
+        return JSONResponse({"error": "not_found"}, status_code=404)
 
     @router.api_route(
         "/{path:path}",

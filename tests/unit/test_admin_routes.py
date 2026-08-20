@@ -234,3 +234,52 @@ async def test_account_errors_are_safely_mapped(client):
 
     assert response.status_code == 404
     assert response.json() == {"error": "account_not_found"}
+
+
+async def test_auth_storage_failures_are_stable_json_errors():
+    class FailingAuth:
+        async def is_setup(self):
+            raise RuntimeError("database detail must not escape")
+
+        async def validate(self, _token):
+            raise RuntimeError("database detail must not escape")
+
+        async def logout(self, _token):
+            raise RuntimeError("database detail must not escape")
+
+    app, _, _, _ = build_app()
+    app.state.admin_auth = FailingAuth()
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as http:
+        status = await http.get("/api/admin/v1/auth/status")
+        http.cookies.set("placegame_session", "A" * 43)
+        accounts = await http.get("/api/admin/v1/accounts")
+        logout = await http.post("/api/admin/v1/auth/logout", json={})
+
+    for response in (status, accounts, logout):
+        assert response.status_code == 500
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json() == {"error": "internal_error"}
+        assert "database detail" not in response.text
+
+
+async def test_invalid_auth_payload_does_not_echo_secret_values(client):
+    http, _, _, _ = client
+    secret = "DO_NOT_ECHO"
+    responses = (
+        await http.post(
+            "/api/admin/v1/auth/setup",
+            json={"password": "a" * 14, "extra": secret},
+        ),
+        await http.post(
+            "/api/admin/v1/auth/login",
+            json={"password": {"secret": secret}},
+        ),
+    )
+
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json() == {"error": "invalid_request"}
+        assert secret not in response.text
