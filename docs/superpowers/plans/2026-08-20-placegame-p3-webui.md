@@ -12,6 +12,8 @@
 
 - Single operator with multiple game accounts; no RBAC, TOTP, recovery codes, or account creation in this milestone.
 - Passwords and session tokens never enter logs, responses, fixtures, or audit payloads.
+- Passwords are at least 14 characters; sessions expire after 30 minutes idle or 12 hours absolute.
+- The `placegame_session` cookie is HttpOnly, SameSite=Strict, and Secure by default; tests explicitly disable Secure for HTTP clients.
 - MCP Bearer authentication and WebUI cookie authentication are separate credentials.
 - Use the existing application use cases for account status and idle preview.
 - Keep the original `placegame-automation` worktree untouched.
@@ -45,7 +47,7 @@ Expected: collection or assertion failure because the new tables/models do not e
 Create `admin_credentials(id INTEGER PRIMARY KEY CHECK (id = 1), password_hash
 TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`
 and `admin_sessions(id UUID PRIMARY KEY, token_digest CHAR(64) UNIQUE NOT NULL,
-created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+created_at TIMESTAMPTZ NOT NULL, absolute_expires_at TIMESTAMPTZ NOT NULL,
 last_seen_at TIMESTAMPTZ NOT NULL)`. Add matching SQLAlchemy models and indexes.
 
 - [ ] **Step 4: Run the focused test to verify it passes**
@@ -84,10 +86,12 @@ Expected: failure because `placegame.admin.auth` is absent.
 - [ ] **Step 3: Implement the minimal service**
 
 Use `argon2.PasswordHasher` with its default Argon2id parameters. Require at
-least 10 characters, generate 32 random bytes for each session, store only
-`sha256(token).hexdigest()`, and set expiry to `utcnow() + timedelta(days=30)`.
-Use one transaction per operation and return generic `unauthorized` for all
-failed login/validation cases.
+least 14 characters, generate 32 random bytes for each session, store only
+`sha256(token).hexdigest()`, and set absolute expiry to `utcnow() +
+timedelta(hours=12)`. Validation rejects sessions older than 30 minutes since
+`last_seen_at` or the absolute expiry, then updates `last_seen_at`. Use one
+transaction per operation and return generic `unauthorized` for all failed
+login/validation cases.
 
 - [ ] **Step 4: Run the focused tests to verify they pass**
 
@@ -126,7 +130,8 @@ Create request models for passwords and a router with public auth endpoints.
 Inject `AdminAuthService`, `AccountStatusQuery`, and `IdlePlanUseCase` from
 `app.state`. Use actor `Actor("webui", "operator", frozenset())`, generate a
 bounded UUID correlation id, and map known errors to JSON codes. Set and clear
-`placegame_session` as HttpOnly, SameSite=Lax with a configurable secure flag.
+`placegame_session` as HttpOnly, SameSite=Strict with Secure enabled by default
+and a test-only explicit configuration switch.
 Register the router before the MCP fallback and expose `/mcp` through the
 existing bearer middleware.
 

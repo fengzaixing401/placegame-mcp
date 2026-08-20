@@ -42,7 +42,7 @@ async def test_admin_credential_is_singleton_and_session_digest_is_unique(admin_
             AdminSession(
                 token_digest=digest,
                 created_at=now,
-                expires_at=now,
+                absolute_expires_at=now,
                 last_seen_at=now,
             )
         )
@@ -57,7 +57,7 @@ async def test_admin_credential_is_singleton_and_session_digest_is_unique(admin_
             AdminSession(
                 token_digest=digest,
                 created_at=now,
-                expires_at=now,
+                absolute_expires_at=now,
                 last_seen_at=now,
             )
         )

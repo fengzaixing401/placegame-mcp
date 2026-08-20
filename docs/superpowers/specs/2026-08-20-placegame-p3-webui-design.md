@@ -31,15 +31,16 @@ access. Those are separate milestones.
 
 The administrator credential is stored as an Argon2id password hash in a
 singleton PostgreSQL row. On a fresh database, `POST /api/admin/v1/auth/setup`
-accepts a password once and creates that row; subsequent setup attempts return
+accepts a password of at least 14 characters once and creates that row; subsequent setup attempts return
 `setup_already_complete`. Passwords are never logged or returned.
 
 Successful login creates a random opaque session token. Only its SHA-256 digest
-is stored in PostgreSQL. The token is sent as an HttpOnly, SameSite=Lax cookie
-named `placegame_session`, with a 30-day expiry. Logout deletes the session and
-clears the cookie. The cookie is not accepted by MCP. Same-origin JSON routes
-and SameSite cookies are sufficient for this single-operator milestone; no
-cross-origin API is enabled.
+is stored in PostgreSQL. The token is sent as an HttpOnly, SameSite=Strict,
+Secure-by-default cookie named `placegame_session`, with a 30-minute idle and
+12-hour absolute expiry. Logout deletes the session and clears the cookie. The
+cookie is not accepted by MCP. Same-origin JSON routes and the Strict cookie
+are sufficient for this single-operator milestone; no cross-origin API is
+enabled.
 
 `GET /api/admin/v1/auth/status` is public and returns whether setup is needed
 and whether the current cookie is authenticated. Protected routes return the
@@ -96,8 +97,8 @@ and no marketing content; it is usable without a separate Node build step.
 Migration `004_admin_sessions` creates:
 
 - `admin_credentials` (singleton id, Argon2id hash, timestamps);
-- `admin_sessions` (UUID, token digest, created/expiry/last-used timestamps,
-  unique digest).
+- `admin_sessions` (UUID, token digest, created/last-used/absolute-expiry
+  timestamps, unique digest).
 
 Expired sessions are ignored and removed during authentication. No plaintext
 password or session token is persisted.

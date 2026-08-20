@@ -26,17 +26,17 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("token_digest", sa.String(length=64), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("absolute_expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("token_digest", name="uq_admin_sessions_token_digest"),
     )
     op.create_index(
-        "ix_admin_sessions_expires_at", "admin_sessions", ["expires_at"]
+        "ix_admin_sessions_absolute_expires_at", "admin_sessions", ["absolute_expires_at"]
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_admin_sessions_expires_at", table_name="admin_sessions")
+    op.drop_index("ix_admin_sessions_absolute_expires_at", table_name="admin_sessions")
     op.drop_table("admin_sessions")
     op.drop_table("admin_credentials")
