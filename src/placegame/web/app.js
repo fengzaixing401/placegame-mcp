@@ -76,7 +76,7 @@
       title.textContent = row.label;
       const meta = document.createElement("div");
       meta.className = "account-meta";
-      meta.textContent = `${row.auth_state} · ${row.enabled ? "enabled" : "disabled"}`;
+      meta.textContent = `${row.auth_state} - ${row.enabled ? "enabled" : "disabled"}`;
       detail.append(title, meta);
       const actions = document.createElement("div");
       actions.className = "account-actions";
@@ -103,7 +103,7 @@
   async function refreshStatus(id, card) {
     try {
       const result = await request(`/accounts/${id}/status`);
-      card.querySelector(".account-meta").textContent = `${result.idle.accumulated_seconds}s idle · ${result.account.auth_state}`;
+      card.querySelector(".account-meta").textContent = `${result.idle.accumulatedSeconds}s idle - ${result.account.auth_state}`;
       showNotice("Status refreshed.");
     } catch (error) { showNotice(messages[error.message] || "Could not refresh status."); }
   }

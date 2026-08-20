@@ -9,25 +9,26 @@ from placegame.admin.auth import AdminAuthService
 from placegame.admin.routes import create_admin_router
 from placegame.application.models import AccountStatus, AccountSummary, IdlePreview, IdleState
 from placegame.contracts import Actor
+from placegame.models import AdminSession
 
 
 class MemoryAuthStore:
     def __init__(self) -> None:
         self.password_hash: str | None = None
-        self.sessions: dict[str, object] = {}
+        self.sessions: dict[str, AdminSession] = {}
 
-    async def setup(self, password_hash, now):
+    async def setup(self, password_hash: str, now: datetime) -> bool:
         if self.password_hash is not None:
             return False
         self.password_hash = password_hash
         return True
 
-    async def read_password_hash(self):
+    async def read_password_hash(self) -> str | None:
         return self.password_hash
 
-    async def create_session(self, token_digest, now, absolute_expires_at):
-        from placegame.models import AdminSession
-
+    async def create_session(
+        self, token_digest: str, now: datetime, absolute_expires_at: datetime
+    ) -> AdminSession:
         record = AdminSession(
             token_digest=token_digest,
             created_at=now,
@@ -37,7 +38,9 @@ class MemoryAuthStore:
         self.sessions[token_digest] = record
         return record
 
-    async def find_session(self, token_digest, now, idle_seconds):
+    async def find_session(
+        self, token_digest: str, now: datetime, idle_seconds: int
+    ) -> AdminSession | None:
         record = self.sessions.get(token_digest)
         if record is None:
             return None
@@ -47,7 +50,7 @@ class MemoryAuthStore:
         record.last_seen_at = now
         return record
 
-    async def delete_session(self, token_digest):
+    async def delete_session(self, token_digest: str) -> None:
         self.sessions.pop(token_digest, None)
 
 
@@ -56,7 +59,7 @@ class StatusFake:
         self.account_id = uuid4()
         self.status_actors: list[Actor] = []
 
-    async def list(self):
+    async def list(self) -> tuple[AccountSummary, ...]:
         return (
             AccountSummary(
                 account_id=self.account_id,
@@ -67,12 +70,12 @@ class StatusFake:
             ),
         )
 
-    async def get(self, account_id: UUID, *, actor: Actor):
+    async def get(self, account_id: UUID, *, actor: Actor) -> AccountStatus:
         self.status_actors.append(actor)
         return AccountStatus(
             account=(await self.list())[0],
             bootstrap_account_id="game-alpha",
-            idle=IdleState(accumulated_seconds=1, capacity_seconds=2),
+            idle=IdleState(accumulatedSeconds=1, capacitySeconds=2),
             fetched_at=datetime(2026, 8, 20, tzinfo=timezone.utc),
         )
 
@@ -81,7 +84,9 @@ class PreviewFake:
     def __init__(self) -> None:
         self.calls: list[tuple[UUID, Actor, str]] = []
 
-    async def preview(self, account_id: UUID, *, actor: Actor, correlation_id: str):
+    async def preview(
+        self, account_id: UUID, *, actor: Actor, correlation_id: str
+    ) -> IdlePreview:
         self.calls.append((account_id, actor, correlation_id))
         return IdlePreview(
             account_id=account_id,
@@ -96,7 +101,7 @@ class PreviewFake:
         )
 
 
-def build_app():
+def build_app(*, cookie_secure: bool = False):
     app = FastAPI()
     auth = AdminAuthService(MemoryAuthStore())
     status = StatusFake()
@@ -104,7 +109,7 @@ def build_app():
     app.state.admin_auth = auth
     app.state.account_status_query = status
     app.state.idle_plan_use_case = preview
-    app.include_router(create_admin_router(cookie_secure=False))
+    app.include_router(create_admin_router(cookie_secure=cookie_secure))
     return app, auth, status, preview
 
 
@@ -161,6 +166,7 @@ async def test_protected_routes_reject_missing_cookie_and_delegate_with_fixed_ac
 
     assert listed.status_code == 200
     assert detail.json()["account"]["account_id"] == str(account_id)
+    assert detail.json()["idle"]["accumulatedSeconds"] == 1
     assert idle.json()["decision"] == "wait"
     assert status.status_actors == [Actor("webui", "operator", frozenset())]
     assert preview.calls[0][1] == Actor("webui", "operator", frozenset())
@@ -187,6 +193,30 @@ async def test_wrong_password_and_cross_origin_write_have_stable_errors(client):
     assert wrong.json() == {"error": "unauthorized"}
     assert cross_origin.status_code == 403
     assert cross_origin.json() == {"error": "origin_forbidden"}
+
+
+async def test_same_host_origin_is_allowed_when_proxy_terminates_tls(client):
+    http, _, _, _ = client
+    response = await http.post(
+        "/api/admin/v1/auth/setup",
+        json={"password": "a" * 14},
+        headers={"Origin": "https://testserver"},
+    )
+    assert response.status_code == 201
+
+
+async def test_production_cookie_default_is_secure():
+    app, _, _, _ = build_app(cookie_secure=True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://testserver"
+    ) as http:
+        await http.post("/api/admin/v1/auth/setup", json={"password": "a" * 14})
+        login = await http.post(
+            "/api/admin/v1/auth/login", json={"password": "a" * 14}
+        )
+
+    assert "Secure" in login.headers["set-cookie"]
 
 
 async def test_account_errors_are_safely_mapped(client):

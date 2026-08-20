@@ -2,11 +2,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from placegame.models import AdminSession
+
 
 class MemoryStore:
     def __init__(self) -> None:
         self.password_hash: str | None = None
-        self.sessions: dict[str, object] = {}
+        self.sessions: dict[str, AdminSession] = {}
 
     async def setup(self, password_hash: str, now: datetime) -> bool:
         if self.password_hash is not None:
@@ -17,9 +19,9 @@ class MemoryStore:
     async def read_password_hash(self) -> str | None:
         return self.password_hash
 
-    async def create_session(self, token_digest: str, now: datetime, absolute_expires_at: datetime):
-        from placegame.models import AdminSession
-
+    async def create_session(
+        self, token_digest: str, now: datetime, absolute_expires_at: datetime
+    ) -> AdminSession:
         session = AdminSession(
             token_digest=token_digest,
             created_at=now,
@@ -29,7 +31,9 @@ class MemoryStore:
         self.sessions[token_digest] = session
         return session
 
-    async def find_session(self, token_digest: str, now: datetime, idle_seconds: int):
+    async def find_session(
+        self, token_digest: str, now: datetime, idle_seconds: int
+    ) -> AdminSession | None:
         session = self.sessions.get(token_digest)
         if session is None:
             return None

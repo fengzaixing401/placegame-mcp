@@ -3,7 +3,9 @@ from uuid import uuid4
 
 import pytest
 from alembic import command
-from sqlalchemy import select, text
+from typing import cast
+
+from sqlalchemy import Table, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -21,8 +23,8 @@ async def admin_engine(postgres_url, alembic_config):
 
 
 def test_admin_models_define_singleton_and_digest_constraints():
-    credential = AdminCredential.__table__
-    session = AdminSession.__table__
+    credential = cast(Table, AdminCredential.__table__)
+    session = cast(Table, AdminSession.__table__)
 
     assert credential.name == "admin_credentials"
     assert session.name == "admin_sessions"

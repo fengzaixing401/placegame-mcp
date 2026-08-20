@@ -103,11 +103,10 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         if origin is None:
             return None
         parsed = urlsplit(origin)
-        expected = f"{request.url.scheme}://{request.url.netloc}"
+        expected_netloc = request.url.netloc.lower()
         if (
             parsed.scheme not in {"http", "https"}
-            or parsed.netloc != request.url.netloc
-            or origin.rstrip("/") != expected
+            or parsed.netloc.lower() != expected_netloc
         ):
             return JSONResponse({"error": "origin_forbidden"}, status_code=403)
         return None
@@ -206,7 +205,7 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         result = await invoke(lambda: request.app.state.account_status_query.list())
         if isinstance(result, JSONResponse):
             return result
-        return [item.model_dump(mode="json") for item in result]
+        return [item.model_dump(mode="json", by_alias=True) for item in result]
 
     @router.get("/accounts/{account_id}/status", response_model=None)
     async def account_status(
@@ -223,7 +222,7 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         )
         if isinstance(result, JSONResponse):
             return result
-        return result.model_dump(mode="json")
+        return result.model_dump(mode="json", by_alias=True)
 
     @router.get("/accounts/{account_id}/idle-preview", response_model=None)
     async def idle_preview(
@@ -241,7 +240,7 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         )
         if isinstance(result, JSONResponse):
             return result
-        return result.model_dump(mode="json")
+        return result.model_dump(mode="json", by_alias=True)
 
     @router.api_route(
         "/{path:path}",
