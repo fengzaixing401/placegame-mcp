@@ -1,0 +1,1 @@
+"""PlaceGame MCP service package."""

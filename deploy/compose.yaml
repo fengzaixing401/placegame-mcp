@@ -1,0 +1,76 @@
+name: placegame-mcp
+
+x-placegame-app: &placegame-app
+  image: ${PLACEGAME_IMAGE:?PLACEGAME_IMAGE is required}
+  environment:
+    PLACEGAME_DATABASE_URL_FILE: /run/secrets/database_url
+    PLACEGAME_MASTER_KEY_FILE: /run/secrets/placegame_master_key
+    PLACEGAME_MCP_TOKEN_FILE: /run/secrets/placegame_mcp_token
+  secrets:
+    - source: database_url
+      target: database_url
+    - source: master_key
+      target: placegame_master_key
+    - source: mcp_token
+      target: placegame_mcp_token
+  networks:
+    - database
+    - egress
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: placegame
+      POSTGRES_USER: placegame
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - source: postgres_password
+        target: postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U placegame -d placegame"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *placegame-app
+    profiles: ["tools"]
+    working_dir: /app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    <<: *placegame-app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18080:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  database:
+    internal: true
+  egress: {}
+
+volumes:
+  postgres_data: {}
+
+secrets:
+  database_url:
+    file: /opt/placegame-mcp/secrets/database_url
+  postgres_password:
+    file: /opt/placegame-mcp/secrets/postgres_password
+  master_key:
+    file: /opt/placegame-mcp/secrets/master_key
+  mcp_token:
+    file: /opt/placegame-mcp/secrets/mcp_token

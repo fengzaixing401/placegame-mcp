@@ -4,20 +4,20 @@
 
 **Goal:** Build the Python 3.12 modular monolith that safely manages multiple PlaceGame accounts, runs durable Beijing-time automation while agents are offline, and exposes a scoped Streamable HTTP MCP endpoint using only typed game HTTP operations.
 
-**Architecture:** FastAPI hosts the admin/API and MCP adapters, while domain services (accounts, policy, plans, jobs, audit, and game client) communicate through explicit protocols. PostgreSQL 16 is the source of durable state; one scheduler lease holder dispatches jobs and per-account PostgreSQL advisory locks serialize mutations. Caddy and Docker Compose provide the production boundary, with no browser runtime in the application image.
+**Architecture:** FastAPI hosts the admin/API and MCP adapters, while domain services (accounts, policy, plans, jobs, audit, and game client) communicate through explicit protocols. PostgreSQL 16 is the source of durable state; one scheduler lease holder dispatches jobs and per-account PostgreSQL advisory locks serialize mutations. The GitHub/OneSSH deployment plan owns production image, Compose, registry, and edge integration.
 
-**Tech Stack:** Python 3.12, FastAPI, Pydantic 2, SQLAlchemy 2 async, asyncpg, Alembic, httpx, cryptography (AES-256-GCM), argon2-cffi, pyotp, official Python MCP SDK (`mcp>=1.12,<2`), structlog, PostgreSQL 16, pytest/pytest-asyncio/Hypothesis, Docker Compose, and Caddy.
+**Tech Stack:** Python 3.12, FastAPI, Pydantic 2, SQLAlchemy 2 async, asyncpg, Alembic, httpx, cryptography (AES-256-GCM), argon2-cffi, pyotp, official Python MCP SDK (`mcp>=1.12,<2`), structlog, PostgreSQL 16, and pytest/pytest-asyncio/Hypothesis.
 
 ## Global Constraints
 
 - All game requests target `https://game.placegame.cn/api/*` through registered typed methods; callers cannot supply a URL, path, or arbitrary request body.
 - Game automation uses direct HTTP APIs only and never browser clicks, DOM access, Playwright, or image recognition.
-- The production topology contains `app`, `postgres`, and `caddy`; only Caddy is public, and PostgreSQL has no published port.
+- The Singapore production topology and edge are defined by `2026-08-17-placegame-github-onessh-deployment-design.md`: `app` binds to `127.0.0.1:18080`, a dedicated PostgreSQL publishes no host port, and existing 1Panel OpenResty remains the external edge.
 - The application runs one active scheduler lease holder; normal account concurrency is four and world-boss work can use all configured slots.
 - At least ten configured accounts must operate independently without credential, state, plan, or job crossover.
 - Dispatch and displayed schedules use `Asia/Shanghai` (`UTC+8`) regardless of VPS local timezone.
 - A 256-bit master key is mounted as a Docker secret; usernames, passwords, session tokens, and TOTP secrets use AES-256-GCM with a fresh nonce and record-bound AAD.
-- Backups include PostgreSQL and Caddy state; the encryption master key is backed up through a separate operator-controlled channel.
+- Backups include PostgreSQL; the encryption master key is backed up through a separate operator-controlled channel, while existing 1Panel configuration remains operator-managed.
 - Credential-mode sessions renew when absent, rejected, or within 24 hours of expiry; token-only accounts pause with `session_refresh_required` when renewal is required.
 - Every mutation acquires the account advisory lock, refreshes authoritative state, rechecks policy and plan preconditions, performs one typed request, verifies the state transition, and audits the result.
 - Sanitized account snapshots have a five-minute logical TTL and are never the sole precondition for a mutation.
@@ -39,7 +39,7 @@
 
 ## Execution Order
 
-Execute this plan first. It delivers the core service and explicit inventory/WebUI extension ports; until the inventory plan is installed, reward-generating scheduler actions fail closed with `inventory_safety_unavailable` and inventory MCP handlers are not advertised.
+After the deployment plan's GitHub repository bootstrap task, execute this plan first. It delivers the core service and explicit inventory/WebUI extension ports; until the inventory plan is installed, reward-generating scheduler actions fail closed with `inventory_safety_unavailable` and inventory MCP handlers are not advertised. Production image and server deployment tasks run only after Core, Inventory, and WebUI pass.
 
 ## File Map
 
@@ -47,9 +47,6 @@ Create or modify these files in the order below. The inventory and WebUI plans e
 
 - Create: `pyproject.toml`, `uv.lock` — pinned runtime, test, lint, and migration dependencies.
 - Create: `.env.example` — non-secret configuration names and safe defaults.
-- Create: `Dockerfile` — production Python image with no browser packages.
-- Create: `docker-compose.yml` — `app`, `postgres`, and `caddy` services, health checks, volumes, and secret mount.
-- Create: `Caddyfile` — HTTPS reverse proxy skeleton and security headers (the WebUI plan completes the public routes).
 - Create: `alembic.ini`, `migrations/env.py`, `migrations/versions/001_core.py` — async migration setup and core tables.
 - Create: `src/placegame/__init__.py`, `src/placegame/config.py`, `src/placegame/app.py` — settings and ASGI factory.
 - Create: `src/placegame/contracts.py`, `src/placegame/errors.py` — cross-module enums, actor/target types, and stable errors.
@@ -96,6 +93,65 @@ class AccountTarget:
 
 ```python
 # src/placegame/accounts/service.py
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar
+from uuid import UUID
+
+T = TypeVar("T")
+
+if TYPE_CHECKING:
+    class VersionedPolicy(Protocol):
+        """Type-only forward declaration replaced by Task 5's concrete import."""
+        version: int
+
+class PolicyProvider(Protocol):
+    async def get(self, account_id: UUID) -> VersionedPolicy: ...
+
+class GameApiFactory(Protocol):
+    def __call__(self, session_token: str | None) -> GameApi: ...
+
+@dataclass(frozen=True)
+class ManagedAccount:
+    id: UUID
+    label: str
+    auth_mode: Literal["credentials", "token_only"]
+    enabled: bool
+    paused_reason: str | None
+    session_expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+@dataclass(frozen=True)
+class SessionState:
+    account_id: UUID
+    authenticated: bool
+    refreshed: bool
+    expires_at: datetime | None
+    paused_reason: str | None
+
+@dataclass(frozen=True)
+class RemovalReceipt:
+    account_id: UUID
+    removed_at: datetime
+    disabled_job_count: int
+
+@dataclass(frozen=True)
+class AccountSnapshot:
+    account_id: UUID
+    enabled: bool
+    paused_reason: str | None
+    authenticated: bool
+    session_expires_at: datetime | None
+    state: Mapping[str, object]
+    state_fingerprint: str
+    fetched_at: datetime
+    expires_at: datetime
+
 @dataclass
 class LockedAccount:
     account_id: UUID
@@ -125,8 +181,14 @@ class AccountService:
         *,
         actor: Actor,
         plan_id: UUID | None = None,
-        verify: Callable[[GameApi, T], Awaitable[bool]] | None = None,
+        verify: Callable[[GameApi, T | None], Awaitable[bool]] | None = None,
     ) -> MutationOutcome[T]: ...
+
+@dataclass(frozen=True)
+class MutationOutcome(Generic[T]):
+    applied: bool
+    reconciled: bool
+    result: T | None
 ```
 
 ```python
@@ -152,7 +214,7 @@ class PlanStore(Protocol):
 - Test: `tests/unit/test_app_bootstrap.py`
 
 **Interfaces:**
-- Produces `Settings.from_env() -> Settings`, `create_app(settings: Settings | None = None) -> FastAPI`, and `FakeGameServer.url` for all later tests.
+- Produces `Settings.from_env() -> Settings`, `Settings.read_database_url() -> str`, `create_app(settings: Settings | None = None) -> FastAPI`, and `FakeGameServer.url` for all later tests.
 
 - [ ] **Step 1: Write the failing smoke test**
 
@@ -208,6 +270,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="forbid")
     database_url: str = "postgresql+asyncpg://placegame:placegame@postgres:5432/placegame"
+    database_url_file: Path | None = Field(None, alias="PLACEGAME_DATABASE_URL_FILE")
     game_base_url: str = "https://game.placegame.cn"
     test_mode: bool = False
     master_key_b64: SecretStr | None = Field(None, alias="PLACEGAME_MASTER_KEY_B64")
@@ -227,6 +290,14 @@ class Settings(BaseSettings):
     @classmethod
     def from_env(cls) -> "Settings":
         return cls()
+
+    def read_database_url(self) -> str:
+        if self.database_url_file is None:
+            return self.database_url
+        value = self.database_url_file.read_text(encoding="utf-8").strip()
+        if not value:
+            raise ValueError("database URL secret file is empty")
+        return value
 
     def read_master_key_b64(self) -> SecretStr:
         if self.master_key_b64 is not None:
@@ -319,7 +390,7 @@ Expected: FAIL because `SecretBox`, `redact`, `token_digest`, and migration meta
 
 - [ ] **Step 3: Implement encryption, redaction, token hashing, and models**
 
-At startup construct `SecretBox(settings.read_master_key_b64().get_secret_value())`; production reads the Docker-secret file and tests inject the environment value. Use a 32-byte decoded master key, 12-byte random nonce, and AES-GCM associated data containing the record identity:
+At startup construct `SecretBox(settings.read_master_key_b64().get_secret_value())`; production reads the Docker-secret file and tests inject the environment value. The async engine is constructed from `settings.read_database_url()` so deployment can mount the full URL as a secret file without exposing it in Compose environment values. Use a 32-byte decoded master key, 12-byte random nonce, and AES-GCM associated data containing the record identity:
 
 ```python
 # src/placegame/security/crypto.py
@@ -546,15 +617,24 @@ git commit -m "feat: add typed placegame http client"
 ### Task 4: Add Account Lifecycle, Session Renewal, Locks, and Reconciliation
 
 **Files:**
+- Create: `src/placegame/accounts/__init__.py`
 - Create: `src/placegame/accounts/repository.py`
 - Create: `src/placegame/accounts/locks.py`
 - Create: `src/placegame/accounts/reconcile.py`
 - Create: `src/placegame/accounts/service.py`
+- Modify: `src/placegame/contracts.py`
+- Modify: `src/placegame/errors.py`
+- Modify: `tests/fakes/game_server.py`
 - Test: `tests/unit/test_accounts.py`
 - Test: `tests/integration/test_account_isolation.py`
 
 **Interfaces:**
 - `AccountService.add_credentials`, `add_token_only`, `update_label`, `update_credentials`, `update_token_only`, `enable`, `disable`, `pause`, `resume`, `disable_drain_remove`, `get`, `ensure_session`, `locked`, `snapshot`, and `mutate` use the frozen shared signatures above.
+- Consumes `GameApi`, `GameAccount`, `AccountSnapshot`, `AuditEvent`, `Job`, `SecretBox`, and an injected game-client factory; callers can never supply a URL, path, arbitrary request body, plaintext persistence value, or second account to a locked operation.
+- Produces the consumer-owned `PolicyProvider.get(account_id) -> VersionedPolicy` port. Until Task 5 supplies the concrete service, the production default raises `PolicyUnavailable` before a typed game mutation is called; Task 4 does not create policy JSON or a concrete policy model.
+- Produces the exact sanitized `ManagedAccount`, `SessionState`, `RemovalReceipt`, and account-domain `AccountSnapshot` dataclasses in the shared interface. Import the ORM snapshot as `AccountSnapshotRecord` inside the repository so the persistence and domain names cannot be confused.
+- Consumes `GameApiFactory(session_token: str | None) -> GameApi` and an injected `token_expiry(token: str) -> datetime | None` resolver. The default resolver may read a numeric JWT `exp` claim after bounded base64url/JSON parsing but never trusts it as authentication; `bootstrap` remains authoritative.
+- Produces `MutationOutcome[T]` with independent `applied`, `reconciled`, and `result: T | None` fields. A verifier receives the real `T` after a normal response and `None` only when no response exists after an ambiguous transport outcome.
 
 - [ ] **Step 1: Write failing lifecycle and ambiguity tests**
 
@@ -571,11 +651,39 @@ async def test_token_only_pauses_when_refresh_is_needed(account_service, token_a
     await account_service.ensure_session(token_account.id, actor=scheduler_actor)
     assert (await account_service.get(token_account.id)).paused_reason == "session_refresh_required"
 
-async def test_timeout_after_commit_is_reconciled_without_duplicate(account_service, fake_game):
+async def test_timeout_after_commit_is_reconciled_without_duplicate(account_service, fake_game, token_account):
     fake_game.commit_then_timeout("idle_collect")
+    seen = []
+    async def idle_counter_increased(api, response):
+        seen.append(response)
+        return (await api.idle_summary()).accumulated_seconds == 0
     result = await account_service.mutate(token_account.id, lambda api: api.idle_collect(), actor=scheduler_actor, verify=idle_counter_increased)
     assert result.applied is True
+    assert result.reconciled is True
+    assert result.result is None
+    assert seen == [None]
     assert fake_game.mutation_count("idle_collect") == 1
+
+async def test_normal_response_is_passed_to_verifier(account_service, token_account):
+    seen = []
+    async def verified(api, response):
+        seen.append(response)
+        return True
+    outcome = await account_service.mutate(token_account.id, lambda api: api.idle_collect(), actor=scheduler_actor, verify=verified)
+    assert seen == [outcome.result]
+    assert outcome.result is not None
+    assert outcome.reconciled is False
+
+async def test_ambiguous_without_verifier_is_never_repeated(account_service, fake_game, token_account):
+    fake_game.commit_then_timeout("idle_collect")
+    with pytest.raises(ReconciliationRequired):
+        await account_service.mutate(token_account.id, lambda api: api.idle_collect(), actor=scheduler_actor)
+    assert fake_game.mutation_count("idle_collect") == 1
+
+async def test_default_policy_provider_fails_closed_before_write(account_service_without_policy, fake_game, token_account):
+    with pytest.raises(PolicyUnavailable):
+        await account_service_without_policy.mutate(token_account.id, lambda api: api.idle_collect(), actor=scheduler_actor)
+    assert fake_game.mutation_count("idle_collect") == 0
 
 async def test_disabling_one_account_blocks_only_its_new_mutations(account_service, account_a, account_b):
     await account_service.disable(account_a.id, actor=admin_actor)
@@ -611,7 +719,28 @@ async def account_lock(session: AsyncSession, account_id: UUID):
     yield
 ```
 
-`ensure_session` decrypts credentials only inside the lock, logs in when the token is absent/rejected/within 24 hours, retries failed login twice with increasing delays, and pauses only that account after three failed authentication cycles in one hour. Token-only accounts set `session_refresh_required` and emit a critical audit event. Label edits are validated and audited; credential/token edits verify `bootstrap` with the proposed secret before atomically replacing the encrypted value, and a failed verification preserves the old secret. `disable_drain_remove` disables new work, drains the account lock, cancels future jobs, deletes secrets, and preserves only tombstoned audit identity. `mutate` refreshes state, checks `enabled`/`paused_reason`, calls the typed operation once, invokes a verifier after success or any ambiguous outcome, reconciles before each of at most two conflict retries with jitter, and writes an audit event containing no secret values.
+Use a type-only structural declaration during Task 4 so static checks remain green without importing a module that Task 5 has not created:
+
+```python
+if TYPE_CHECKING:
+    class VersionedPolicy(Protocol):
+        version: int
+
+class PolicyProvider(Protocol):
+    async def get(self, account_id: UUID) -> VersionedPolicy: ...
+
+class FailClosedPolicyProvider:
+    async def get(self, account_id: UUID) -> VersionedPolicy:
+        raise PolicyUnavailable()
+```
+
+Task 5 replaces only the type-only declaration with an import of its concrete `VersionedPolicy`; the runtime port and `LockedAccount` do not change.
+
+`ensure_session` decrypts credentials only inside the lock, logs in when the token is absent/rejected/within 24 hours, retries failed login twice with increasing delays, and pauses only that account after three failed authentication cycles in one hour. Resolve and persist expiry from the injected token-expiry resolver whenever a token is added or renewed. An opaque token with no trustworthy expiry remains `None`: validate it with `bootstrap`, renew credential-mode accounts if the server rejects it, and pause token-only accounts if the server rejects it; never fabricate an expiry timestamp. Its public entry point owns a transaction and account lock; `mutate` and `locked` call one internal lock-aware routine with their existing transaction and never reacquire the advisory lock through another session. Token-only accounts set `session_refresh_required` and emit a critical audit event. Label edits are normalized to a non-empty value of at most 120 characters and audited; credential/token edits verify `bootstrap` with the proposed secret before atomically replacing the encrypted value, and a failed verification preserves the old secret. `disable_drain_remove` first disables new work, waits for the account lock, disables future jobs, clears all encrypted secrets, and keeps a disabled row with `paused_reason="removed"` so existing audit foreign keys retain a tombstoned account identity.
+
+`mutate` refreshes authoritative state, checks `enabled`/`paused_reason`, resolves the same account's policy, and rechecks any plan precondition before calling the typed operation. After a normal response it passes the real response to `verify`. After `AmbiguousMutation` it refreshes authoritative state and passes `None`; `True` returns `MutationOutcome(applied=True, reconciled=True, result=None)`, while a false result, verifier error, or missing verifier raises `ReconciliationRequired` and never repeats the mutation. Only a definite `GameConflict` uses the separate retry budget: refresh and recheck before each retry, add injected jitter, and stop after two retries. Every terminal path writes a redacted audit event containing no secret values.
+
+The integration test opens independent database sessions to prove same-account advisory locking serializes mutations while different-account locks can progress, seeds at least ten accounts, injects a session or mutation failure into one, and asserts no credentials, snapshots, policy lookup, jobs, or lifecycle state change for the other nine.
 
 - [ ] **Step 4: Run lifecycle, isolation, and reconciliation tests**
 
@@ -622,7 +751,7 @@ Expected: all tests pass; the injected account failure leaves other account snap
 - [ ] **Step 5: Commit the account checkpoint**
 
 ```bash
-git add src/placegame/accounts tests/unit/test_accounts.py tests/integration/test_account_isolation.py
+git add src/placegame/accounts src/placegame/contracts.py src/placegame/errors.py tests/fakes/game_server.py tests/unit/test_accounts.py tests/integration/test_account_isolation.py
 git commit -m "feat: add account locks and session reconciliation"
 ```
 
@@ -864,7 +993,7 @@ class McpTokenService(Protocol):
     async def revoke(self, token_id: UUID, *, actor: Actor) -> None: ...
 
 class McpTokenStore(Protocol):
-    async def find_by_digest(self, digest: bytes) -> McpTokenRecord | None: ...
+    async def find_by_digest(self, digest: str) -> McpTokenRecord | None: ...
 ```
 
 ```python
@@ -948,20 +1077,17 @@ git add src/placegame/mcp src/placegame/app.py tests/unit/test_mcp.py
 git commit -m "feat: expose scoped streamable http mcp"
 ```
 
-### Task 8: Add Observability, Health Checks, Deployment, and Core Acceptance Tests
+### Task 8: Add Observability, Health Checks, and Core Acceptance Tests
 
 **Files:**
 - Create: `src/placegame/audit.py`
 - Create: `src/placegame/observability.py`
 - Create: `src/placegame/health.py`
 - Modify: `src/placegame/app.py`
-- Create: `Dockerfile`
-- Create: `docker-compose.yml`
-- Create: `Caddyfile`
 - Create: `tests/integration/test_core_acceptance.py`
 
 **Interfaces:**
-- Produces `/health/live`, `/health/ready`, structured JSON logs, 90-day audit cleanup, and a Compose deployment that starts without a browser package or public PostgreSQL port.
+- Produces `/health/live`, `/health/ready`, structured JSON logs, 90-day audit cleanup, and the health contract consumed by the deployment plan.
 
 - [ ] **Step 1: Write failing acceptance checks**
 
@@ -975,19 +1101,20 @@ async def test_ten_accounts_are_isolated_and_ambiguous_mutation_is_not_repeated(
     snapshots = [await core_stack.snapshot(account.id) for account in accounts]
     assert all(snapshots)
 
-def test_compose_has_no_postgres_port_or_browser_dependency():
-    compose = yaml.safe_load(Path("docker-compose.yml").read_text())
-    assert "ports" not in compose["services"]["postgres"]
-    assert not any("playwright" in dep.lower() or "chromium" in dep.lower() for dep in Path("Dockerfile").read_text().splitlines())
+async def test_readiness_reports_database_and_scheduler(core_stack):
+    response = await core_stack.client.get("/health/ready")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["scheduler_lease"]["healthy"] is True
 ```
 
 - [ ] **Step 2: Run acceptance tests and verify they fail**
 
 Run: `uv run pytest tests/integration/test_core_acceptance.py -q`
 
-Expected: FAIL until health, audit, and Compose files are wired.
+Expected: FAIL until health, audit, and readiness dependencies are wired.
 
-- [ ] **Step 3: Implement redacted JSON logging, health, and Compose**
+- [ ] **Step 3: Implement redacted JSON logging and health**
 
 ```python
 # src/placegame/health.py
@@ -997,24 +1124,24 @@ async def ready(db: AsyncSession = Depends(get_session), scheduler: Scheduler = 
     return {"status": "ok", "scheduler_lease": await scheduler.lease_status()}
 ```
 
-`audit.py` writes append-only events with actor/source/account/plan/action/cost/result/correlation ID and a scheduled 90-day purge that keeps metadata needed for tombstones. `observability.py` installs structlog processors that recursively redact secret keys, attaches correlation/account IDs, and records counters for job success/retries/missed windows, API latency, authentication failures, and inventory pressure. Health probes cover process, database, scheduler lease, and a non-mutating game-connectivity check. Alerts cover paused accounts, token expiry, world-boss misses, repeated failures, HTTP 426/schema protection, and unsafe inventory pressure through an adapter interface that can later support email, Telegram, or webhooks. `Dockerfile` is a multi-stage Python-only image; `docker-compose.yml` defines `app`, `postgres:16`, and `caddy`, a persistent database volume, health checks, and a read-only master-key secret mount. `Caddyfile` redirects HTTP to HTTPS, proxies `/mcp` and `/api` to app, limits body size, and sets TLS/security headers; frontend-specific routes are left for the WebUI plan.
+`audit.py` writes append-only events with actor/source/account/plan/action/cost/result/correlation ID and a scheduled 90-day purge that keeps metadata needed for tombstones. `observability.py` installs structlog processors that recursively redact secret keys, attaches correlation/account IDs, and records counters for job success/retries/missed windows, API latency, authentication failures, and inventory pressure. Health probes cover process, database, scheduler lease, and a non-mutating game-connectivity check. Alerts cover paused accounts, token expiry, world-boss misses, repeated failures, HTTP 426/schema protection, and unsafe inventory pressure through an adapter interface that can later support email, Telegram, or webhooks. `/health/ready` returns a stable sanitized scheduler-lease object so the deployment plan can gate rollout without seeing credentials or raw database errors.
 
 - [ ] **Step 4: Run all core checks**
 
-Run: `uv run pytest -q && docker compose config`
+Run: `uv run pytest -q && uv run pyright src tests`
 
-Expected: all core tests pass, migrations finish, and Compose prints a valid configuration with no `postgres` published port.
+Expected: all core tests pass, migrations finish, and Pyright reports zero errors.
 
 - [ ] **Step 5: Commit the core baseline**
 
 ```bash
-git add src/placegame/audit.py src/placegame/observability.py src/placegame/health.py src/placegame/app.py Dockerfile docker-compose.yml Caddyfile tests/integration/test_core_acceptance.py
-git commit -m "feat: harden core observability and deployment"
+git add src/placegame/audit.py src/placegame/observability.py src/placegame/health.py src/placegame/app.py tests/integration/test_core_acceptance.py
+git commit -m "feat: add core observability and health"
 ```
 
 ## Core Self-Review Checklist
 
-- Spec coverage: tasks 1–2 cover topology, persistence, credential security, redaction, and audit; tasks 3–4 cover the typed API boundary, session renewal, locks, reconciliation, and account isolation; task 5 covers every default policy, optimizer bound, reserve, profession protection, and safe reward rule; task 6 covers all recurring jobs, Beijing windows, leases, retries, and concurrency; task 7 covers every core MCP handler plus canonical inventory scope reservations, selectors, and secret-redaction rules; task 8 covers health, observability, deployment, and acceptance criteria. Inventory Task 6 completes and advertises the reserved inventory tools.
+- Spec coverage: tasks 1–2 cover persistence, credential security, redaction, and audit; tasks 3–4 cover the typed API boundary, session renewal, locks, reconciliation, and account isolation; task 5 covers every default policy, optimizer bound, reserve, profession protection, and safe reward rule; task 6 covers all recurring jobs, Beijing windows, leases, retries, and concurrency; task 7 covers every core MCP handler plus canonical inventory scope reservations, selectors, and secret-redaction rules; task 8 covers health, observability, and core acceptance criteria. Inventory Task 6 completes and advertises the reserved inventory tools; the deployment plan covers image and server topology.
 - Placeholder scan command: `rg -n -i "T[O]DO|T[B]D|F[I]XME|implement[ ]later|fill[ ]in|write[ ]tests[ ]for[ ]the[ ]above|appropriate[ ]error[ ]handling|similar[ ]to[ ]task" docs/superpowers/plans/2026-08-17-placegame-mcp-core.md`; expected output is empty.
 - Type/signature check: `uv run pyright src tests` must report zero errors; `GameApi`, all frozen `AccountService` methods, `PlanStore`, `PolicyService`, `InventorySafetyPort`, `McpTokenService`, `Actor`, and `AccountTarget` must match the shared contracts above.
-- Fresh verification: `uv run pytest -q` (including the Testcontainers migration check) and `docker compose config` must both succeed before choosing an execution mode.
+- Fresh verification: `uv run pytest -q` (including the Testcontainers migration check) and `uv run pyright src tests` must both succeed before moving to Inventory.
