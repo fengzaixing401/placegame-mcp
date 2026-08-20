@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -12,6 +13,22 @@ IMAGE_REPOSITORY = "ghcr.io/fengzaixing401/placegame-mcp"
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z", re.ASCII)
 INSTALL_ROOT = Path("/opt/placegame-mcp")
 PROJECT_NAME = "placegame-mcp"
+COMPOSE_CONTROL_ENV = frozenset(
+    {
+        "PLACEGAME_IMAGE",
+        "COMPOSE_FILE",
+        "COMPOSE_PROJECT_NAME",
+        "COMPOSE_PROJECT_DIRECTORY",
+        "COMPOSE_PROFILES",
+        "COMPOSE_ENV_FILES",
+        "COMPOSE_PATH_SEPARATOR",
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+        "DOCKER_DEFAULT_PLATFORM",
+    }
+)
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +50,12 @@ class CommandRunner(Protocol):
 
 class SubprocessRunner:
     def run(self, argv: tuple[str, ...]) -> None:
-        subprocess.run(argv, check=True, shell=False)
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in COMPOSE_CONTROL_ENV
+        }
+        subprocess.run(argv, check=True, shell=False, env=environment)
 
 
 class Deployer:
@@ -125,7 +147,10 @@ class Deployer:
                     except Exception:
                         logger.error("deployment_rollback_failed", extra={"rollback_step": step})
             else:
-                self.runner.run(self._compose(candidate, "stop", "app"))
+                try:
+                    self.runner.run(self._compose(candidate, "stop", "app"))
+                except Exception:
+                    logger.error("deployment_cleanup_failed", extra={"cleanup_step": "stop"})
             raise
 
 

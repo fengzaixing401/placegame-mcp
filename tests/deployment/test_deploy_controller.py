@@ -1,6 +1,6 @@
 import pytest
 
-from deploy.placegame_deploy import IMAGE_REPOSITORY, Deployer, validate_digest
+from deploy.placegame_deploy import IMAGE_REPOSITORY, Deployer, SubprocessRunner, validate_digest
 
 
 @pytest.mark.parametrize("value", ["latest", "sha256:ABCDEF", "sha256:" + "a" * 63, "sha256:" + "a" * 65, "sha256:" + "a" * 64 + ";docker ps"])
@@ -151,3 +151,51 @@ def test_first_deploy_health_failure_stops_only_app(tmp_path) -> None:
         Deployer(runner=runner, root=tmp_path, health_probe=lambda _url: False, health_attempts=1).deploy("sha256:" + "2" * 64)
     assert any(command[-2:] == ("stop", "app") for command in runner.commands)
     assert not any("down" in command for command in runner.commands)
+
+
+def test_first_deploy_stop_failure_preserves_health_error(tmp_path) -> None:
+    class StopFailingRunner(RecordingRunner):
+        def run(self, argv: tuple[str, ...]) -> None:
+            self.commands.append(argv)
+            if argv[-2:] == ("stop", "app"):
+                raise RuntimeError("stop failed")
+
+    runner = StopFailingRunner()
+    with pytest.raises(RuntimeError, match="health check failed"):
+        Deployer(
+            runner=runner,
+            root=tmp_path,
+            health_probe=lambda _url: False,
+            health_attempts=1,
+        ).deploy("sha256:" + "2" * 64)
+    assert any(command[-2:] == ("stop", "app") for command in runner.commands)
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "PLACEGAME_IMAGE",
+        "COMPOSE_FILE",
+        "COMPOSE_PROJECT_NAME",
+        "COMPOSE_PROJECT_DIRECTORY",
+        "COMPOSE_PROFILES",
+        "COMPOSE_ENV_FILES",
+        "COMPOSE_PATH_SEPARATOR",
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+        "DOCKER_DEFAULT_PLATFORM",
+    ],
+)
+def test_subprocess_runner_does_not_inherit_compose_control(monkeypatch, variable: str) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+
+    monkeypatch.setenv(variable, "unexpected")
+    monkeypatch.setattr("deploy.placegame_deploy.subprocess.run", fake_run)
+    SubprocessRunner().run(("docker", "compose"))
+    assert variable not in captured["env"]

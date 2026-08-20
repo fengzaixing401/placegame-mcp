@@ -52,6 +52,7 @@ def test_release_workflow_tags_digest_artifact_and_isolation() -> None:
     assert "ghcr.io/fengzaixing401/placegame-mcp@${{ steps.build.outputs.digest }}" in source
     assert "image-digest.txt" in source
     assert "linux/arm64" in source
+    assert "docker run --platform linux/arm64" in source
     assert "ssh" not in source.lower()
     assert "onessh" not in source.lower()
     assert "/opt/" not in source

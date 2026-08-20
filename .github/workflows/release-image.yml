@@ -59,7 +59,7 @@ jobs:
         run: |
           master_key="$(openssl rand -base64 32)"
           mcp_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-          docker run --detach --name placegame-release-smoke \
+          docker run --platform linux/arm64 --detach --name placegame-release-smoke \
             --env PLACEGAME_MASTER_KEY_B64="$master_key" \
             --env PLACEGAME_MCP_TOKEN="$mcp_token" \
             "${IMAGE}@${{ steps.build.outputs.digest }}"
