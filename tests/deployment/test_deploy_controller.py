@@ -181,7 +181,6 @@ def test_first_deploy_stop_failure_preserves_health_error(tmp_path) -> None:
         "COMPOSE_PROFILES",
         "COMPOSE_ENV_FILES",
         "COMPOSE_PATH_SEPARATOR",
-        "DOCKER_HOST",
         "DOCKER_CONTEXT",
         "DOCKER_TLS_VERIFY",
         "DOCKER_CERT_PATH",
@@ -199,3 +198,15 @@ def test_subprocess_runner_does_not_inherit_compose_control(monkeypatch, variabl
     monkeypatch.setattr("deploy.placegame_deploy.subprocess.run", fake_run)
     SubprocessRunner().run(("docker", "compose"))
     assert variable not in captured["env"]
+
+
+def test_subprocess_runner_forces_local_docker_socket(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setenv("DOCKER_HOST", "tcp://unexpected:2375")
+    monkeypatch.setattr("deploy.placegame_deploy.subprocess.run", fake_run)
+    SubprocessRunner().run(("docker", "compose"))
+    assert captured["env"]["DOCKER_HOST"] == "unix:///var/run/docker.sock"

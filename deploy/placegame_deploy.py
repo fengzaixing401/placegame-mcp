@@ -22,7 +22,6 @@ COMPOSE_CONTROL_ENV = frozenset(
         "COMPOSE_PROFILES",
         "COMPOSE_ENV_FILES",
         "COMPOSE_PATH_SEPARATOR",
-        "DOCKER_HOST",
         "DOCKER_CONTEXT",
         "DOCKER_TLS_VERIFY",
         "DOCKER_CERT_PATH",
@@ -55,6 +54,7 @@ class SubprocessRunner:
             for key, value in os.environ.items()
             if key not in COMPOSE_CONTROL_ENV
         }
+        environment["DOCKER_HOST"] = "unix:///var/run/docker.sock"
         subprocess.run(argv, check=True, shell=False, env=environment)
 
 
