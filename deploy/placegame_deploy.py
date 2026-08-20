@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -33,7 +34,9 @@ class CommandRunner(Protocol):
 
 class SubprocessRunner:
     def run(self, argv: tuple[str, ...]) -> None:
-        subprocess.run(argv, check=True, shell=False)
+        environment = os.environ.copy()
+        environment.pop("PLACEGAME_IMAGE", None)
+        subprocess.run(argv, check=True, shell=False, env=environment)
 
 
 class Deployer:
@@ -125,7 +128,10 @@ class Deployer:
                     except Exception:
                         logger.error("deployment_rollback_failed", extra={"rollback_step": step})
             else:
-                self.runner.run(self._compose(candidate, "stop", "app"))
+                try:
+                    self.runner.run(self._compose(candidate, "stop", "app"))
+                except Exception:
+                    logger.error("deployment_cleanup_failed", extra={"cleanup_step": "stop"})
             raise
 
 
