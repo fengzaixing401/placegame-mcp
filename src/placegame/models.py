@@ -191,6 +191,33 @@ class McpToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
+class AdminCredential(Base):
+    __tablename__ = "admin_credentials"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_admin_credentials_singleton"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
+class AdminSession(Base):
+    __tablename__ = "admin_sessions"
+    __table_args__ = (
+        UniqueConstraint("token_digest", name="uq_admin_sessions_token_digest"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    token_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 
@@ -226,4 +253,5 @@ Index("ix_action_plans_expires_at", ActionPlan.expires_at)
 Index("ix_jobs_due", Job.enabled, Job.next_run_at)
 Index("ix_job_runs_lease_retry", JobRun.lease_expires_at, JobRun.next_retry_at)
 Index("ix_mcp_tokens_expires_at", McpToken.expires_at)
+Index("ix_admin_sessions_expires_at", AdminSession.expires_at)
 Index("ix_audit_events_retention", AuditEvent.created_at)
