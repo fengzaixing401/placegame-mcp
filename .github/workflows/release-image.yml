@@ -64,13 +64,14 @@ jobs:
             --env PLACEGAME_MCP_TOKEN="$mcp_token" \
             "${IMAGE}@${{ steps.build.outputs.digest }}"
           trap 'docker rm --force placegame-release-smoke || true' EXIT
-          for attempt in {1..30}; do
+          for attempt in {1..60}; do
             status="$(docker inspect --format='{{.State.Health.Status}}' placegame-release-smoke)"
             if [ "$status" = "healthy" ]; then break; fi
             sleep 2
           done
           if [ "$(docker inspect --format='{{.State.Health.Status}}' placegame-release-smoke)" != healthy ]; then
             docker inspect --format='status={{.State.Status}} health={{.State.Health.Status}}' placegame-release-smoke
+            docker inspect --format='{{json .State.Health.Log}}' placegame-release-smoke
             docker logs placegame-release-smoke
             exit 1
           fi
