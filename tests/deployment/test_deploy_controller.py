@@ -171,14 +171,31 @@ def test_first_deploy_stop_failure_preserves_health_error(tmp_path) -> None:
     assert any(command[-2:] == ("stop", "app") for command in runner.commands)
 
 
-def test_subprocess_runner_does_not_inherit_image_override(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "PLACEGAME_IMAGE",
+        "COMPOSE_FILE",
+        "COMPOSE_PROJECT_NAME",
+        "COMPOSE_PROJECT_DIRECTORY",
+        "COMPOSE_PROFILES",
+        "COMPOSE_ENV_FILES",
+        "COMPOSE_PATH_SEPARATOR",
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+        "DOCKER_DEFAULT_PLATFORM",
+    ],
+)
+def test_subprocess_runner_does_not_inherit_compose_control(monkeypatch, variable: str) -> None:
     captured: dict[str, object] = {}
 
     def fake_run(argv, **kwargs):
         captured["argv"] = argv
         captured.update(kwargs)
 
-    monkeypatch.setenv("PLACEGAME_IMAGE", "unexpected")
+    monkeypatch.setenv(variable, "unexpected")
     monkeypatch.setattr("deploy.placegame_deploy.subprocess.run", fake_run)
     SubprocessRunner().run(("docker", "compose"))
-    assert "PLACEGAME_IMAGE" not in captured["env"]
+    assert variable not in captured["env"]
