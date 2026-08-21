@@ -28,7 +28,8 @@ async def test_root_and_assets_are_public_webui_resources(settings):
     assert css.headers["content-type"].startswith("text/css")
     assert script.status_code == 200
     assert "api/admin/v1" in script.text
-    assert "Create game account" in root.text
+    assert "创建游戏账号" in root.text
+    assert 'lang="zh-CN"' in root.text
     assert "sessionToken" in script.text
     assert "/accounts/credentials" in script.text
     assert "/accounts/token-only" in script.text

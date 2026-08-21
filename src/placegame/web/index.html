@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#10171d" />
-    <title>PlaceGame Console</title>
+    <title>PlaceGame 控制台</title>
     <link rel="stylesheet" href="/assets/style.css" />
   </head>
   <body>
@@ -12,86 +12,86 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">PLACEGAME</p>
-          <h1>Operator console</h1>
+          <h1>运维控制台</h1>
         </div>
-        <button id="logout" class="quiet hidden" type="button">Sign out</button>
+        <button id="logout" class="quiet hidden" type="button">退出登录</button>
       </header>
 
       <section id="notice" class="notice" role="status" aria-live="polite"></section>
 
       <section id="auth-panel" class="panel auth-panel" aria-labelledby="auth-title">
-        <p class="eyebrow" id="auth-mode">ACCESS</p>
-        <h2 id="auth-title">Sign in</h2>
-        <p id="auth-copy" class="muted">Use the administrator password for this server.</p>
+        <p class="eyebrow" id="auth-mode">访问</p>
+        <h2 id="auth-title">登录</h2>
+        <p id="auth-copy" class="muted">请输入本服务器的管理员密码。</p>
         <form id="auth-form">
-          <label for="password">Password</label>
+          <label for="password">密码</label>
           <input id="password" name="password" type="password" autocomplete="current-password" required />
-          <button id="auth-submit" class="primary" type="submit">Sign in</button>
+          <button id="auth-submit" class="primary" type="submit">登录</button>
         </form>
       </section>
 
       <section id="console" class="hidden" aria-labelledby="accounts-title">
         <section class="panel create-panel" aria-labelledby="create-title">
-          <p class="eyebrow">ADD ACCOUNT</p>
-          <h2 id="create-title">Create game account</h2>
-          <p class="muted">Credentials are verified once and are never displayed again.</p>
+          <p class="eyebrow">添加账号</p>
+          <h2 id="create-title">创建游戏账号</h2>
+          <p class="muted">凭据仅在创建时校验一次，之后不会再次显示。</p>
           <form id="account-create-form" class="account-form">
             <div class="field">
-              <label for="account-label">Label</label>
+              <label for="account-label">名称</label>
               <input id="account-label" name="label" maxlength="120" required />
             </div>
             <div class="field">
-              <label for="account-auth-mode">Authentication</label>
+              <label for="account-auth-mode">认证方式</label>
               <select id="account-auth-mode" name="authMode">
-                <option value="credentials">Username and password</option>
-                <option value="token_only">Session token</option>
+                <option value="credentials">用户名与密码</option>
+                <option value="token_only">会话令牌</option>
               </select>
             </div>
             <div id="account-username-field" class="field">
-              <label for="account-username">Game username</label>
+              <label for="account-username">游戏用户名</label>
               <input id="account-username" name="username" autocomplete="username" />
             </div>
             <div id="account-password-field" class="field">
-              <label for="account-password">Game password</label>
+              <label for="account-password">游戏密码</label>
               <input id="account-password" name="password" type="password" autocomplete="new-password" />
             </div>
             <div id="account-token-field" class="field hidden">
-              <label for="account-token">Session token</label>
+              <label for="account-token">会话令牌</label>
               <input id="account-token" name="sessionToken" type="password" autocomplete="off" />
             </div>
-            <button id="account-create-submit" class="primary" type="submit">Create account</button>
+            <button id="account-create-submit" class="primary" type="submit">创建账号</button>
           </form>
         </section>
 
         <div class="section-heading">
           <div>
-            <p class="eyebrow">ACCOUNTS</p>
-            <h2 id="accounts-title">Game accounts</h2>
+            <p class="eyebrow">账号列表</p>
+            <h2 id="accounts-title">游戏账号</h2>
           </div>
-          <button id="refresh-all" class="quiet" type="button" title="Refresh account list">Refresh</button>
+          <button id="refresh-all" class="quiet" type="button" title="刷新账号列表">刷新</button>
         </div>
         <div id="accounts" class="account-list" aria-live="polite"></div>
       </section>
     </main>
     <dialog id="edit-dialog" aria-labelledby="edit-dialog-title">
       <form id="edit-form">
-        <p class="eyebrow">EDIT ACCOUNT</p>
-        <h2 id="edit-dialog-title">Edit game account</h2>
+        <p class="eyebrow">编辑账号</p>
+        <h2 id="edit-dialog-title">编辑游戏账号</h2>
         <div class="field">
-          <label for="edit-label">Label</label>
+          <label for="edit-label">名称</label>
           <input id="edit-label" name="label" maxlength="120" required />
         </div>
         <div id="edit-username-field" class="field">
-          <label for="edit-username">Game username (optional)</label>
+          <label for="edit-username">游戏用户名（可选）</label>
           <input id="edit-username" name="username" autocomplete="username" />
         </div>
         <div class="field">
-          <label id="edit-secret-label" for="edit-secret">New secret (optional)</label>
+          <label id="edit-secret-label" for="edit-secret">新密钥（可选）</label>
           <input id="edit-secret" name="secret" type="password" autocomplete="new-password" />
         </div>
         <div class="dialog-actions">
-          <button id="edit-cancel" type="submit" value="cancel">Cancel</button>
-          <button id="edit-submit" class="primary" type="submit" value="save">Save</button>
+          <button id="edit-cancel" type="submit" value="cancel">取消</button>
+          <button id="edit-submit" class="primary" type="submit" value="save">保存</button>
         </div>
       </form>
     </dialog>

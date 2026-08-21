@@ -25,15 +25,25 @@
   const editSecretLabel = document.querySelector("#edit-secret-label");
 
   const messages = {
-    unauthorized: "Session expired. Sign in again.",
-    account_not_found: "Account not found.",
-    game_unavailable: "Game service is temporarily unavailable.",
-    game_contract_changed: "Game response changed; refresh and try again.",
-    account_auth_mode_conflict: "Use the editor for the account's current authentication mode.",
-    account_identity_conflict: "That game account is already managed here.",
-    authentication_required: "The game credentials were rejected.",
-    invalid_request: "Check the required fields and try again.",
+    unauthorized: "会话已过期，请重新登录。",
+    account_not_found: "账号不存在。",
+    game_unavailable: "游戏服务暂时不可用。",
+    game_contract_changed: "游戏返回结构已变化，请刷新后重试。",
+    account_auth_mode_conflict: "请使用与该账号当前认证方式匹配的编辑入口。",
+    account_identity_conflict: "该游戏账号已在此处管理。",
+    authentication_required: "游戏凭据被拒绝。",
+    invalid_request: "请检查必填项后重试。",
   };
+
+  const authStates = {
+    authenticated: "已认证",
+    required: "待认证",
+    unknown: "状态未知",
+  };
+
+  function authStateLabel(state) {
+    return authStates[state] || state;
+  }
 
   async function request(path, options = {}) {
     const response = await fetch(`${api}${path}`, {
@@ -61,7 +71,7 @@
     if (!button) return;
     button.disabled = pending;
     button.dataset.previousText = button.dataset.previousText || button.textContent;
-    button.textContent = pending ? "Working..." : button.dataset.previousText;
+    button.textContent = pending ? "处理中…" : button.dataset.previousText;
   }
 
   function updateCreateMode() {
@@ -76,10 +86,10 @@
 
   function setAuthMode(setup) {
     authPanel.classList.remove("hidden");
-    authMode.textContent = setup ? "FIRST RUN" : "ACCESS";
-    authTitle.textContent = setup ? "Set administrator password" : "Sign in";
-    authCopy.textContent = setup ? "Create the password used to access this server." : "Use the administrator password for this server.";
-    authSubmit.textContent = setup ? "Create password" : "Sign in";
+    authMode.textContent = setup ? "首次配置" : "访问";
+    authTitle.textContent = setup ? "设置管理员密码" : "登录";
+    authCopy.textContent = setup ? "创建用于访问本服务器的密码。" : "请输入本服务器的管理员密码。";
+    authSubmit.textContent = setup ? "创建密码" : "登录";
     authForm.dataset.mode = setup ? "setup" : "login";
     document.querySelector("#password").autocomplete = setup ? "new-password" : "current-password";
   }
@@ -101,7 +111,7 @@
     if (!rows.length) {
       const empty = document.createElement("p");
       empty.className = "empty";
-      empty.textContent = "No game accounts configured.";
+      empty.textContent = "尚未配置任何游戏账号。";
       accounts.append(empty);
       return;
     }
@@ -113,42 +123,42 @@
       title.textContent = row.label;
       const meta = document.createElement("div");
       meta.className = "account-meta";
-      meta.textContent = `${row.auth_state} - ${row.enabled ? "enabled" : "disabled"}`;
+      meta.textContent = `${authStateLabel(row.auth_state)} · ${row.enabled ? "已启用" : "已停用"}`;
       detail.append(title, meta);
       const actions = document.createElement("div");
       actions.className = "account-actions";
       const statusButton = document.createElement("button");
       statusButton.type = "button";
-      statusButton.textContent = "Status";
+      statusButton.textContent = "状态";
       statusButton.addEventListener("click", () => refreshStatus(row.account_id, card));
       const previewButton = document.createElement("button");
       previewButton.type = "button";
-      previewButton.textContent = "Idle preview";
+      previewButton.textContent = "挂机预览";
       previewButton.addEventListener("click", () => previewIdle(row.account_id, card));
       const editButton = document.createElement("button");
       editButton.type = "button";
-      editButton.textContent = "Edit";
+      editButton.textContent = "编辑";
       editButton.addEventListener("click", () => editAccount(row));
       const lifecycleButton = document.createElement("button");
       lifecycleButton.type = "button";
-      lifecycleButton.textContent = row.enabled ? "Disable" : "Enable";
+      lifecycleButton.textContent = row.enabled ? "停用" : "启用";
       lifecycleButton.addEventListener("click", () => mutateAccount(
         row.account_id, row.enabled ? "disable" : "enable", {}, lifecycleButton
       ));
       const pauseButton = document.createElement("button");
       pauseButton.type = "button";
-      pauseButton.textContent = row.paused_reason ? "Resume" : "Pause";
+      pauseButton.textContent = row.paused_reason ? "恢复" : "暂停";
       pauseButton.addEventListener("click", () => {
         if (row.paused_reason) return mutateAccount(row.account_id, "resume", {}, pauseButton);
-        const reason = window.prompt("Pause reason", "operator");
+        const reason = window.prompt("暂停原因", "operator");
         if (reason) mutateAccount(row.account_id, "pause", { reason }, pauseButton);
       });
       const removeButton = document.createElement("button");
       removeButton.type = "button";
       removeButton.className = "danger";
-      removeButton.textContent = "Remove";
+      removeButton.textContent = "移除";
       removeButton.addEventListener("click", () => {
-        if (window.confirm("Remove this account? This cannot be undone.")) {
+        if (window.confirm("确定移除该账号？此操作不可撤销。")) {
           mutateAccount(row.account_id, "remove", {}, removeButton);
         }
       });
@@ -159,24 +169,24 @@
   }
 
   async function loadAccounts() {
-    accounts.textContent = "Loading...";
+    accounts.textContent = "加载中…";
     try { renderAccounts(await request("/accounts")); }
-    catch (error) { if (error.status === 401) showAuth(false); showNotice(messages[error.message] || "Could not load accounts."); }
+    catch (error) { if (error.status === 401) showAuth(false); showNotice(messages[error.message] || "无法加载账号列表。"); }
   }
 
   async function refreshStatus(id, card) {
     try {
       const result = await request(`/accounts/${id}/status`);
-      card.querySelector(".account-meta").textContent = `${result.idle.accumulatedSeconds}s idle - ${result.account.auth_state}`;
-      showNotice("Status refreshed.");
-    } catch (error) { showNotice(messages[error.message] || "Could not refresh status."); }
+      card.querySelector(".account-meta").textContent = `已挂机 ${result.idle.accumulatedSeconds} 秒 · ${authStateLabel(result.account.auth_state)}`;
+      showNotice("状态已刷新。");
+    } catch (error) { showNotice(messages[error.message] || "无法刷新状态。"); }
   }
 
   async function previewIdle(id) {
     try {
       const result = await request(`/accounts/${id}/idle-preview`);
-      showNotice(result.decision === "collect" ? "Idle collection is ready." : "Idle threshold not reached.");
-    } catch (error) { showNotice(messages[error.message] || "Could not preview idle state."); }
+      showNotice(result.decision === "collect" ? "挂机收益已可领取。" : "尚未达到挂机领取阈值。");
+    } catch (error) { showNotice(messages[error.message] || "无法预览挂机状态。"); }
   }
 
   async function mutateAccount(id, action, body, button) {
@@ -186,10 +196,10 @@
         method: action === "remove" ? "DELETE" : "POST",
         body: JSON.stringify(body),
       });
-      showNotice("Account updated.");
+      showNotice("账号已更新。");
     } catch (error) {
       if (error.status === 401) showAuth(false);
-      showNotice(messages[error.message] || "Could not update account.");
+      showNotice(messages[error.message] || "无法更新账号。");
     } finally {
       setPending(button, false);
       await loadAccounts();
@@ -211,7 +221,7 @@
       editSecret.value = "";
       const credentials = row.auth_mode === "credentials";
       editUsernameField.classList.toggle("hidden", !credentials);
-      editSecretLabel.textContent = credentials ? "New game password (optional)" : "New session token (optional)";
+      editSecretLabel.textContent = credentials ? "新游戏密码（可选）" : "新会话令牌（可选）";
       editSecret.type = "password";
       editForm.onsubmit = (event) => {
         event.preventDefault();
@@ -251,8 +261,8 @@
           });
         }
       }
-      showNotice("Account updated.");
-    } catch (error) { showNotice(messages[error.message] || "Could not edit account."); }
+      showNotice("账号已更新。");
+    } catch (error) { showNotice(messages[error.message] || "无法编辑账号。"); }
     finally {
       clearSecretFields(editForm);
       editUsername.value = "";
@@ -268,9 +278,9 @@
     try {
       await request(`/auth/${mode}`, { method: "POST", body: JSON.stringify({ password }) });
       document.querySelector("#password").value = "";
-      if (mode === "setup") { showAuth(false); showNotice("Password created. Sign in to continue."); }
+      if (mode === "setup") { showAuth(false); showNotice("密码已创建，请登录后继续。"); }
       else { showConsole(); await loadAccounts(); }
-    } catch (error) { showNotice(messages[error.message] || "Authentication failed."); }
+    } catch (error) { showNotice(messages[error.message] || "认证失败。"); }
   });
 
   logout.addEventListener("click", async () => {
@@ -293,9 +303,9 @@
       });
       createForm.reset();
       updateCreateMode();
-      showNotice("Account created.");
+      showNotice("账号已创建。");
     } catch (error) {
-      showNotice(messages[error.message] || "Could not create account.");
+      showNotice(messages[error.message] || "无法创建账号。");
     } finally {
       clearSecretFields(createForm);
       setPending(button, false);
@@ -309,6 +319,6 @@
       const state = await request("/auth/status");
       if (state.authenticated) { showConsole(); await loadAccounts(); }
       else showAuth(state.setupRequired);
-    } catch (_) { showNotice("Service unavailable."); showAuth(false); }
+    } catch (_) { showNotice("服务不可用。"); showAuth(false); }
   })();
 })();
