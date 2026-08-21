@@ -2,6 +2,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import re
+from uuid import uuid4
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -13,6 +14,7 @@ _ALLOWED_HOST = re.compile(
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::\*)?\Z",
     re.ASCII,
 )
+_DEFAULT_SCHEDULER_WORKER_ID = uuid4().hex
 
 
 class Settings(BaseSettings):
@@ -37,7 +39,9 @@ class Settings(BaseSettings):
         alias="PLACEGAME_MCP_ALLOWED_HOSTS",
     )
     admin_cookie_secure: bool = Field(True, alias="PLACEGAME_ADMIN_COOKIE_SECURE")
+    scheduler_interval_seconds: int = 300
     scheduler_lease_seconds: int = 30
+    scheduler_worker_id: str = _DEFAULT_SCHEDULER_WORKER_ID
     max_account_concurrency: int = 4
     audit_retention_days: int = 90
 
