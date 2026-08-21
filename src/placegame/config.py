@@ -36,6 +36,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["127.0.0.1:*", "localhost:*", "[::1]:*"],
         alias="PLACEGAME_MCP_ALLOWED_HOSTS",
     )
+    admin_cookie_secure: bool = Field(True, alias="PLACEGAME_ADMIN_COOKIE_SECURE")
     scheduler_lease_seconds: int = 30
     max_account_concurrency: int = 4
     audit_retention_days: int = 90

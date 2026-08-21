@@ -1,11 +1,15 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Response
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 
 from .accounts.repository import AccountRepository
 from .accounts.service import AccountService
+from .admin.auth import AdminAuthService, PostgresAdminAuthStore
+from .admin.routes import create_admin_router
 from .application.idle import IdleExecutionClaims, IdleExecutionGuard, IdleExecuteUseCase, IdlePlanUseCase, IdlePreviewStore
 from .application.status import AccountStatusQuery
 from .config import Settings
@@ -25,6 +29,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.database = Database.from_settings(app.state.settings)
     app.state.session_factory = app.state.database.sessions
     app.state.http_client = httpx.AsyncClient()
+    app.state.admin_auth = AdminAuthService(
+        PostgresAdminAuthStore(app.state.session_factory)
+    )
     repository = AccountRepository()
 
     def game_factory(session_token: str | None) -> HttpGameClient:
@@ -67,6 +74,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.router.lifespan_context = lifespan
 
+    app.include_router(
+        create_admin_router(cookie_secure=app.state.settings.admin_cookie_secure)
+    )
+
     @app.get("/health/live")
     async def live() -> dict[str, str]:
         return {"status": "ok"}
@@ -80,6 +91,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             response.status_code = 503
             return {"status": "unavailable"}
         return {"status": "ok"}
+
+    web_root = Path(__file__).with_name("web")
+
+    @app.get("/", name="webui_root", include_in_schema=False)
+    async def webui_root() -> FileResponse:
+        return FileResponse(web_root / "index.html", media_type="text/html")
+
+    @app.get("/assets/style.css", name="webui_style", include_in_schema=False)
+    async def webui_style() -> FileResponse:
+        return FileResponse(web_root / "style.css", media_type="text/css")
+
+    @app.get("/assets/app.js", name="webui_script", include_in_schema=False)
+    async def webui_script() -> FileResponse:
+        return FileResponse(web_root / "app.js", media_type="text/javascript")
 
     app.mount("/", StaticBearerAuthMiddleware(mcp_child, mcp_token), name="mcp")
 

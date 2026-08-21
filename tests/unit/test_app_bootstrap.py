@@ -28,13 +28,22 @@ async def test_health_endpoint_is_available(settings):
     assert response.json() == {"status": "ok"}
 
 
-def test_app_has_health_then_one_root_mcp_fallback(settings):
+def test_app_has_admin_webui_health_then_one_root_mcp_fallback(settings):
     app = create_app(with_mcp(settings))
-    assert [(route.path, route.name) for route in app.routes] == [
+    routes = [
+        (route.path, route.name)
+        for route in app.routes
+        if hasattr(route, "path")
+    ]
+    assert routes == [
         ("/health/live", "live"),
         ("/health/ready", "ready"),
+        ("/", "webui_root"),
+        ("/assets/style.css", "webui_style"),
+        ("/assets/app.js", "webui_script"),
         ("", "mcp"),
     ]
+    assert any(type(route).__name__ == "_IncludedRouter" for route in app.routes)
     assert app.docs_url is app.redoc_url is app.openapi_url is None
 
 
