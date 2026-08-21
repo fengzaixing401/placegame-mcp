@@ -8,7 +8,9 @@
 # extra="forbid"），把 POSTGRES_PASSWORD 这类仅供 compose 替换的变量写进去，
 # 之后在本地直接运行应用或跑测试会因为未知字段而启动失败。
 
-name: placegame-mcp
+# 项目名刻意与 deploy/compose.yaml 的 placegame-mcp 区分开：同一台机器上如果已经用
+# deploy/ 跑了生产栈，这份配置不会去接管或替换那些容器。
+name: placegame-mcp-local
 
 x-app: &app
   build:
