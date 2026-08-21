@@ -7,6 +7,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from placegame.application.errors import ApplicationError
@@ -33,9 +36,15 @@ from placegame.errors import (
     ReconciliationRequired,
     SessionRejected,
 )
+from placegame.models import Job, JobRun, SchedulerLease
 
 
 Clock = Callable[[], datetime]
+
+LEASE_NAME = "default"
+JOB_KIND = "idle_preview"
+JOB_TIMEZONE = "Asia/Shanghai"
+JOB_MISFIRE_POLICY = "defer"
 
 
 class SchedulerAccount(Protocol):
@@ -102,14 +111,49 @@ class IdlePreviewUseCasePort(Protocol):
     ) -> IdlePreview: ...
 
 
-class _UnavailableStore:
-    """Makes an omitted store fail explicitly until the durable store is wired."""
+def idle_preview_idempotency_key(account_id: UUID, scheduled_for: datetime) -> str:
+    """Return a stable, bounded key for one account and scheduled slot."""
+
+    if scheduled_for.tzinfo is None:
+        scheduled_for = scheduled_for.replace(tzinfo=timezone.utc)
+    slot = scheduled_for.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    return f"idle_preview:{account_id}:{slot}"
+
+
+class PostgresIdlePreviewStore:
+    """Elects one worker per tick and records each account slot exactly once."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self.sessions = sessions
 
     async def acquire_lease(
         self, *, worker_id: str, now: datetime, lease_seconds: int
     ) -> bool:
-        del worker_id, now, lease_seconds
-        raise RuntimeError("idle preview scheduler store is not configured")
+        async with self.sessions.begin() as session:
+            await session.execute(
+                pg_insert(SchedulerLease)
+                .values(name=LEASE_NAME, updated_at=now)
+                .on_conflict_do_nothing(index_elements=["name"])
+            )
+            lease = await session.scalar(
+                select(SchedulerLease)
+                .where(SchedulerLease.name == LEASE_NAME)
+                .with_for_update()
+            )
+            if lease is None:
+                return False
+            if (
+                lease.owner is not None
+                and lease.owner != worker_id
+                and lease.lease_expires_at is not None
+                and lease.lease_expires_at > now
+            ):
+                return False
+            lease.owner = worker_id
+            lease.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            lease.updated_at = now
+            await session.flush()
+            return True
 
     async def ensure_jobs(
         self,
@@ -118,8 +162,59 @@ class _UnavailableStore:
         now: datetime,
         interval_seconds: int,
     ) -> None:
-        del accounts, now, interval_seconds
-        raise RuntimeError("idle preview scheduler store is not configured")
+        known = frozenset(account.id for account in accounts)
+        if not known:
+            return
+        eligible = frozenset(
+            account.id
+            for account in accounts
+            if account.enabled and account.paused_reason is None
+        )
+        schedule = f"interval:{interval_seconds}"
+        async with self.sessions.begin() as session:
+            rows = (
+                await session.scalars(
+                    select(Job)
+                    .where(Job.kind == JOB_KIND, Job.account_id.in_(known))
+                    .order_by(Job.account_id, Job.created_at)
+                    .with_for_update()
+                )
+            ).all()
+            current: dict[UUID, Job] = {}
+            for row in rows:
+                if row.account_id in current:
+                    # At most one idle-preview job per account stays enabled.
+                    row.enabled = False
+                else:
+                    current[row.account_id] = row
+            for account_id in known:
+                job = current.get(account_id)
+                if account_id not in eligible:
+                    if job is not None:
+                        job.enabled = False
+                    continue
+                if job is None:
+                    session.add(
+                        Job(
+                            account_id=account_id,
+                            kind=JOB_KIND,
+                            schedule=schedule,
+                            timezone=JOB_TIMEZONE,
+                            enabled=True,
+                            next_run_at=now,
+                            misfire_policy=JOB_MISFIRE_POLICY,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    continue
+                job.schedule = schedule
+                job.timezone = JOB_TIMEZONE
+                job.misfire_policy = JOB_MISFIRE_POLICY
+                job.enabled = True
+                if job.next_run_at is None:
+                    job.next_run_at = now
+            await session.flush()
 
     async def claim_due(
         self,
@@ -129,8 +224,94 @@ class _UnavailableStore:
         lease_seconds: int,
         account_ids: frozenset[UUID],
     ) -> tuple[ClaimedIdlePreviewRun, ...]:
-        del now, worker_id, lease_seconds, account_ids
-        raise RuntimeError("idle preview scheduler store is not configured")
+        if not account_ids:
+            return ()
+        claimed: list[ClaimedIdlePreviewRun] = []
+        async with self.sessions.begin() as session:
+            due = (
+                await session.scalars(
+                    select(Job)
+                    .where(
+                        Job.kind == JOB_KIND,
+                        Job.enabled.is_(True),
+                        Job.account_id.in_(account_ids),
+                        Job.next_run_at.is_not(None),
+                        Job.next_run_at <= now,
+                    )
+                    .order_by(Job.account_id)
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+            for job in due:
+                scheduled_for = job.next_run_at
+                if scheduled_for is None:
+                    continue
+                run = await self._claim_slot(
+                    session,
+                    job,
+                    scheduled_for,
+                    now=now,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+                if run is not None:
+                    claimed.append(run)
+        return tuple(claimed)
+
+    async def _claim_slot(
+        self,
+        session: AsyncSession,
+        job: Job,
+        scheduled_for: datetime,
+        *,
+        now: datetime,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> ClaimedIdlePreviewRun | None:
+        idempotency_key = idle_preview_idempotency_key(job.account_id, scheduled_for)
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
+        run = JobRun(
+            job_id=job.id,
+            account_id=job.account_id,
+            idempotency_key=idempotency_key,
+            dispatched_at=now,
+            lease_owner=worker_id,
+            lease_expires_at=lease_expires_at,
+            attempt=1,
+        )
+        try:
+            async with session.begin_nested():
+                session.add(run)
+                await session.flush()
+        except IntegrityError:
+            # The slot already exists; only an abandoned, unfinished run is retaken.
+            existing = await session.scalar(
+                select(JobRun)
+                .where(
+                    JobRun.account_id == job.account_id,
+                    JobRun.idempotency_key == idempotency_key,
+                )
+                .with_for_update()
+            )
+            if existing is None or existing.completed_at is not None:
+                return None
+            if (
+                existing.lease_expires_at is not None
+                and existing.lease_expires_at > now
+            ):
+                return None
+            existing.lease_owner = worker_id
+            existing.lease_expires_at = lease_expires_at
+            existing.attempt += 1
+            await session.flush()
+            run = existing
+        return ClaimedIdlePreviewRun(
+            run_id=run.id,
+            job_id=job.id,
+            account_id=job.account_id,
+            scheduled_for=scheduled_for,
+            idempotency_key=idempotency_key,
+        )
 
     async def finish_run(
         self,
@@ -140,20 +321,35 @@ class _UnavailableStore:
         next_run_at: datetime,
         result: dict[str, object],
     ) -> None:
-        del claimed, completed_at, next_run_at, result
-        raise RuntimeError("idle preview scheduler store is not configured")
+        async with self.sessions.begin() as session:
+            run = await session.scalar(
+                select(JobRun).where(JobRun.id == claimed.run_id).with_for_update()
+            )
+            if run is None or run.completed_at is not None:
+                return
+            run.result = dict(result)
+            run.completed_at = completed_at
+            run.lease_owner = None
+            run.lease_expires_at = None
+            job = await session.scalar(
+                select(Job).where(Job.id == claimed.job_id).with_for_update()
+            )
+            if job is not None:
+                job.next_run_at = next_run_at
+            await session.flush()
 
     async def release_lease(self, *, worker_id: str) -> None:
-        del worker_id
-
-
-def idle_preview_idempotency_key(account_id: UUID, scheduled_for: datetime) -> str:
-    """Return a stable, bounded key for one account and scheduled slot."""
-
-    if scheduled_for.tzinfo is None:
-        scheduled_for = scheduled_for.replace(tzinfo=timezone.utc)
-    slot = scheduled_for.astimezone(timezone.utc).replace(microsecond=0).isoformat()
-    return f"idle_preview:{account_id}:{slot}"
+        async with self.sessions.begin() as session:
+            lease = await session.scalar(
+                select(SchedulerLease)
+                .where(SchedulerLease.name == LEASE_NAME)
+                .with_for_update()
+            )
+            if lease is None or lease.owner != worker_id:
+                return
+            lease.owner = None
+            lease.lease_expires_at = None
+            await session.flush()
 
 
 def _error_code(error: Exception) -> str:
@@ -213,7 +409,7 @@ class IdlePreviewScheduler:
         self.sessions = sessions
         self.accounts = accounts
         self.idle_preview = idle_preview
-        self.store = store or _UnavailableStore()
+        self.store = store or PostgresIdlePreviewStore(sessions)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.worker_id = worker_id
         self.interval_seconds = interval_seconds
