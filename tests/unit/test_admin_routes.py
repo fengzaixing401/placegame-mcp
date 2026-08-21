@@ -26,6 +26,9 @@ class MemoryAuthStore:
     async def read_password_hash(self) -> str | None:
         return self.password_hash
 
+    async def update_password_hash(self, password_hash: str, now: datetime) -> None:
+        self.password_hash = password_hash
+
     async def create_session(
         self, token_digest: str, now: datetime, absolute_expires_at: datetime
     ) -> AdminSession:
@@ -52,6 +55,9 @@ class MemoryAuthStore:
 
     async def delete_session(self, token_digest: str) -> None:
         self.sessions.pop(token_digest, None)
+
+    async def delete_all_sessions(self) -> None:
+        self.sessions.clear()
 
 
 class StatusFake:
@@ -144,6 +150,53 @@ async def test_auth_setup_status_login_and_logout_cookie_boundary(client):
     logout = await http.post("/api/admin/v1/auth/logout", json={})
     assert logout.status_code == 204
     assert "Max-Age=0" in logout.headers["set-cookie"]
+
+
+async def test_change_password_requires_a_session_and_the_current_password(client):
+    http, _, _, _ = client
+
+    denied = await http.patch(
+        "/api/admin/v1/auth/password",
+        json={"currentPassword": "a" * 14, "newPassword": "second"},
+    )
+    assert denied.status_code == 401
+    assert denied.json() == {"error": "unauthorized"}
+
+    await http.post("/api/admin/v1/auth/setup", json={"password": "a" * 14})
+    await http.post("/api/admin/v1/auth/login", json={"password": "a" * 14})
+
+    wrong = await http.patch(
+        "/api/admin/v1/auth/password",
+        json={"currentPassword": "wrong", "newPassword": "second"},
+    )
+    assert wrong.status_code == 401
+    assert wrong.json() == {"error": "unauthorized"}
+
+
+async def test_change_password_clears_the_cookie_and_reports_a_blank_new_password(client):
+    http, auth, _, _ = client
+
+    await http.post("/api/admin/v1/auth/setup", json={"password": "a" * 14})
+    await http.post("/api/admin/v1/auth/login", json={"password": "a" * 14})
+
+    blank = await http.patch(
+        "/api/admin/v1/auth/password",
+        json={"currentPassword": "a" * 14, "newPassword": "   "},
+    )
+    assert blank.status_code == 422
+    assert blank.json() == {"error": "password_too_short"}
+
+    changed = await http.patch(
+        "/api/admin/v1/auth/password",
+        json={"currentPassword": "a" * 14, "newPassword": "x"},
+    )
+    assert changed.status_code == 204
+    assert "Max-Age=0" in changed.headers["set-cookie"]
+    assert auth.store.sessions == {}
+
+    assert (await http.get("/api/admin/v1/accounts")).status_code == 401
+    relogin = await http.post("/api/admin/v1/auth/login", json={"password": "x"})
+    assert relogin.status_code == 200
 
 
 async def test_protected_routes_reject_missing_cookie_and_delegate_with_fixed_actor(client):

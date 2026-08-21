@@ -23,6 +23,11 @@
   const editUsername = document.querySelector("#edit-username");
   const editSecret = document.querySelector("#edit-secret");
   const editSecretLabel = document.querySelector("#edit-secret-label");
+  const changePassword = document.querySelector("#change-password");
+  const passwordDialog = document.querySelector("#password-dialog");
+  const passwordForm = document.querySelector("#password-form");
+  const currentPassword = document.querySelector("#current-password");
+  const newPassword = document.querySelector("#new-password");
 
   const messages = {
     unauthorized: "会话已过期，请重新登录。",
@@ -33,6 +38,8 @@
     account_identity_conflict: "该游戏账号已在此处管理。",
     authentication_required: "游戏凭据被拒绝。",
     invalid_request: "请检查必填项后重试。",
+    password_too_short: "密码不能为空。",
+    setup_already_complete: "管理员密码已设置过，请直接登录。",
   };
 
   const authStates = {
@@ -98,11 +105,13 @@
     authPanel.classList.add("hidden");
     consolePanel.classList.remove("hidden");
     logout.classList.remove("hidden");
+    changePassword.classList.remove("hidden");
   }
 
   function showAuth(setup) {
     consolePanel.classList.add("hidden");
     logout.classList.add("hidden");
+    changePassword.classList.add("hidden");
     setAuthMode(setup);
   }
 
@@ -270,6 +279,49 @@
     }
   }
 
+  function collectPasswordChange() {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearSecretFields(passwordForm);
+        passwordDialog.close();
+        resolve(value);
+      };
+      currentPassword.value = "";
+      newPassword.value = "";
+      passwordForm.onsubmit = (event) => {
+        event.preventDefault();
+        if (event.submitter && event.submitter.value === "cancel") return finish(null);
+        finish({ current: currentPassword.value, next: newPassword.value });
+      };
+      passwordDialog.oncancel = (event) => { event.preventDefault(); finish(null); };
+      passwordDialog.showModal();
+      currentPassword.focus();
+    });
+  }
+
+  async function editPassword() {
+    const values = await collectPasswordChange();
+    if (!values) return;
+    try {
+      await request("/auth/password", {
+        method: "PATCH",
+        body: JSON.stringify({
+          currentPassword: values.current,
+          newPassword: values.next,
+        }),
+      });
+      showAuth(false);
+      showNotice("密码已修改，所有会话已失效，请用新密码重新登录。");
+    } catch (error) {
+      showNotice(messages[error.message] || "无法修改密码。");
+    } finally {
+      clearSecretFields(passwordForm);
+    }
+  }
+
   authForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     showNotice("");
@@ -287,6 +339,7 @@
     try { await request("/auth/logout", { method: "POST", body: "{}" }); } finally { showAuth(false); }
   });
   refreshAll.addEventListener("click", loadAccounts);
+  changePassword.addEventListener("click", editPassword);
   authModeSelect.addEventListener("change", updateCreateMode);
   createForm.addEventListener("submit", async (event) => {
     event.preventDefault();
