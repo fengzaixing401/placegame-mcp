@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,8 @@ from placegame.models import Job, JobRun, SchedulerLease
 
 
 Clock = Callable[[], datetime]
+
+logger = logging.getLogger(__name__)
 
 LEASE_NAME = "default"
 JOB_KIND = "idle_preview"
@@ -480,12 +483,30 @@ class IdlePreviewScheduler:
                     "plan_id": str(preview.plan_id) if preview.plan_id else None,
                     "correlation_id": correlation_id,
                 }
-            await self.store.finish_run(
-                claimed,
-                completed_at=now,
-                next_run_at=now + timedelta(seconds=self.interval_seconds),
-                result=result,
-            )
+            # `next_run_at` stays anchored to the tick slot so the interval does not
+            # drift; `completed_at` must record when the work actually ended.
+            try:
+                await self.store.finish_run(
+                    claimed,
+                    completed_at=self.clock(),
+                    next_run_at=now + timedelta(seconds=self.interval_seconds),
+                    result=result,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # One account's storage failure must not abort the others. The run
+                # stays recoverable once its lease expires.
+                logger.error(
+                    "scheduler_run_not_recorded",
+                    extra={
+                        "worker_id": self.worker_id,
+                        "job_id": str(claimed.job_id),
+                        "account_id": str(claimed.account_id),
+                        "correlation_id": correlation_id,
+                        "code": _error_code(error),
+                    },
+                )
 
     async def run(self, stop: asyncio.Event) -> None:
         while not self._closed and not stop.is_set():
@@ -493,9 +514,15 @@ class IdlePreviewScheduler:
                 await self.tick()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 # A failed tick must not make the application-wide loop unstoppable.
-                pass
+                logger.error(
+                    "scheduler_tick_failed",
+                    extra={
+                        "worker_id": self.worker_id,
+                        "code": _error_code(error),
+                    },
+                )
             if self._closed or stop.is_set():
                 break
             await self._wait_for_next_tick(stop)

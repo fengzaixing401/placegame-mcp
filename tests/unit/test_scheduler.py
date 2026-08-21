@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from placegame.application.errors import ApplicationError
@@ -129,6 +131,31 @@ class FakeStore:
         self.released.append(worker_id)
 
 
+class FinishFailingStore(FakeStore):
+    def __init__(
+        self, claims: Sequence[ClaimedIdlePreviewRun], *, failing_account: UUID
+    ) -> None:
+        super().__init__(claims)
+        self.failing_account = failing_account
+
+    async def finish_run(
+        self,
+        claimed: ClaimedIdlePreviewRun,
+        *,
+        completed_at: datetime,
+        next_run_at: datetime,
+        result: dict[str, object],
+    ) -> None:
+        if claimed.account_id == self.failing_account:
+            raise RuntimeError("primary is down")
+        await super().finish_run(
+            claimed,
+            completed_at=completed_at,
+            next_run_at=next_run_at,
+            result=result,
+        )
+
+
 class PreviewFake:
     def __init__(self, failures: dict[UUID, Exception] | None = None) -> None:
         self.failures = failures or {}
@@ -201,13 +228,14 @@ def scheduler(
     *,
     worker_id: str = WORKER_ID,
     max_account_concurrency: int = 4,
+    clock: Callable[[], datetime] | None = None,
 ) -> IdlePreviewScheduler:
     return IdlePreviewScheduler(
         cast(async_sessionmaker[AsyncSession], object()),
         FakeAccounts(accounts),
         preview,
         store=store,
-        clock=lambda: NOW,
+        clock=clock or (lambda: NOW),
         worker_id=worker_id,
         interval_seconds=300,
         lease_seconds=30,
@@ -388,3 +416,46 @@ async def test_close_stops_a_running_loop_promptly_and_is_idempotent() -> None:
 
     await asyncio.wait_for(task, timeout=0.2)
     assert await subject.tick(NOW) == 0
+
+
+async def test_completed_at_is_read_at_finish_while_the_next_slot_stays_anchored() -> None:
+    account = FakeAccount(uuid4())
+    store = FakeStore([claimed_run(account.id)])
+    readings = iter([NOW, NOW + timedelta(seconds=7)])
+    subject = scheduler(
+        [account], store, PreviewFake(), clock=lambda: next(readings)
+    )
+
+    assert await subject.tick() == 1
+
+    finished = store.finished[0]
+    assert finished.completed_at == NOW + timedelta(seconds=7)
+    assert finished.next_run_at == NOW + timedelta(seconds=300)
+
+
+async def test_a_storage_failure_is_isolated_and_logged_without_raw_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    accounts = [FakeAccount(uuid4()) for _ in range(3)]
+    failing = accounts[1]
+    store = FinishFailingStore(
+        [claimed_run(account.id) for account in accounts],
+        failing_account=failing.id,
+    )
+    preview = PreviewFake()
+
+    with caplog.at_level(logging.ERROR, logger="placegame.scheduler"):
+        assert await scheduler(accounts, store, preview).tick(NOW) == 3
+
+    assert len(preview.calls) == 3
+    assert {run.claimed.account_id for run in store.finished} == {
+        account.id for account in accounts if account.id != failing.id
+    }
+    assert store.released == [WORKER_ID]
+    events = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "placegame.scheduler"
+    ]
+    assert events == ["scheduler_run_not_recorded"]
+    assert "primary is down" not in caplog.text
