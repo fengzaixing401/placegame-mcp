@@ -187,11 +187,13 @@
         body: JSON.stringify(body),
       });
       showNotice("Account updated.");
-      await loadAccounts();
     } catch (error) {
       if (error.status === 401) showAuth(false);
       showNotice(messages[error.message] || "Could not update account.");
-    } finally { setPending(button, false); }
+    } finally {
+      setPending(button, false);
+      await loadAccounts();
+    }
   }
 
   function collectEditValues(row) {
@@ -250,11 +252,11 @@
         }
       }
       showNotice("Account updated.");
-      await loadAccounts();
     } catch (error) { showNotice(messages[error.message] || "Could not edit account."); }
     finally {
       clearSecretFields(editForm);
       editUsername.value = "";
+      await loadAccounts();
     }
   }
 
@@ -292,10 +294,13 @@
       createForm.reset();
       updateCreateMode();
       showNotice("Account created.");
-      await loadAccounts();
     } catch (error) {
       showNotice(messages[error.message] || "Could not create account.");
-    } finally { clearSecretFields(createForm); setPending(button, false); }
+    } finally {
+      clearSecretFields(createForm);
+      setPending(button, false);
+      await loadAccounts();
+    }
   });
   updateCreateMode();
 
