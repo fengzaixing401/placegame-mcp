@@ -11,6 +11,7 @@ from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from placegame.accounts.service import ManagedAccount
 from placegame.application.errors import ApplicationError
 from placegame.contracts import Actor
 from placegame.errors import (
@@ -70,6 +71,46 @@ class PasswordRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
+class CredentialsCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    label: str = Field(min_length=1, max_length=120)
+    username: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=8192)
+
+
+class TokenOnlyCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
+
+    label: str = Field(min_length=1, max_length=120)
+    session_token: str = Field(alias="sessionToken", min_length=1, max_length=8192)
+
+
+class LabelUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    label: str = Field(min_length=1, max_length=120)
+
+
+class CredentialsUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    username: str | None = Field(default=None, max_length=256)
+    password: str = Field(min_length=1, max_length=8192)
+
+
+class TokenOnlyUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
+
+    session_token: str = Field(alias="sessionToken", min_length=1, max_length=8192)
+
+
+class PauseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    reason: str = Field(min_length=1, max_length=256)
+
+
 _ERROR_CODES: tuple[tuple[type[Exception], str, int], ...] = (
     (AccountNotFound, "account_not_found", 404),
     (AccountIdentityConflict, "account_identity_conflict", 409),
@@ -110,6 +151,8 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
             return JSONResponse({"error": error.code}, status_code=status)
         if isinstance(error, ApplicationError):
             return JSONResponse({"error": error.code}, status_code=409)
+        if isinstance(error, ValueError):
+            return JSONResponse({"error": "invalid_request"}, status_code=422)
         for kind, code, status in _ERROR_CODES:
             if isinstance(error, kind):
                 return JSONResponse({"error": code}, status_code=status)
@@ -133,6 +176,34 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         if not content_type.lower().startswith("application/json"):
             return JSONResponse({"error": "content_type_required"}, status_code=415)
         return None
+
+    def write_guard(request: Request) -> JSONResponse | None:
+        origin_error = same_origin(request)
+        if origin_error is not None:
+            return origin_error
+        return require_json(request)
+
+    def account_payload(account: ManagedAccount) -> dict[str, Any]:
+        return {
+            "account_id": account.id,
+            "label": account.label,
+            "auth_mode": account.auth_mode,
+            "enabled": account.enabled,
+            "paused_reason": account.paused_reason,
+            "session_expires_at": account.session_expires_at,
+            "created_at": account.created_at,
+            "updated_at": account.updated_at,
+        }
+
+    def account_response(account: ManagedAccount) -> dict[str, Any]:
+        return {"account": account_payload(account)}
+
+    def account_list_payload(account: ManagedAccount) -> dict[str, Any]:
+        payload = account_payload(account)
+        payload["auth_state"] = (
+            "required" if account.paused_reason == "authentication_required" else "unknown"
+        )
+        return payload
 
     def set_session_cookie(response: Response, token: str) -> None:
         response.set_cookie(
@@ -235,6 +306,13 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
             return session
         if session is None:
             return unauthorized()
+        if hasattr(request.app.state, "account_service"):
+            result = await invoke(
+                request.app.state.account_service.list_accounts
+            )
+            if isinstance(result, JSONResponse):
+                return result
+            return [account_list_payload(item) for item in result]
         result = await invoke(lambda: request.app.state.account_status_query.list())
         if isinstance(result, JSONResponse):
             return result
@@ -278,6 +356,228 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         if isinstance(result, JSONResponse):
             return result
         return result.model_dump(mode="json", by_alias=True)
+
+    async def authenticated_write(
+        request: Request,
+        session: AdminSession | JSONResponse | None,
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any | JSONResponse:
+        access_error = write_access(request, session)
+        if access_error is not None:
+            return access_error
+        return await invoke(operation)
+
+    def write_access(
+        request: Request, session: AdminSession | JSONResponse | None
+    ) -> JSONResponse | None:
+        guard = write_guard(request)
+        if guard is not None:
+            return guard
+        if isinstance(session, JSONResponse):
+            return session
+        if session is None:
+            return unauthorized()
+        return None
+
+    async def account_after(
+        request: Request,
+        account_id: UUID,
+        session: AdminSession | JSONResponse | None,
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        result = await authenticated_write(request, session, operation)
+        if isinstance(result, JSONResponse):
+            return result
+        account = await invoke(
+            lambda: request.app.state.account_service.get(account_id)
+        )
+        if isinstance(account, JSONResponse):
+            return account
+        return account_response(account)
+
+    async def require_account_mode(
+        request: Request, account_id: UUID, expected: str
+    ) -> JSONResponse | None:
+        account = await invoke(
+            lambda: request.app.state.account_service.get(account_id)
+        )
+        if isinstance(account, JSONResponse):
+            return account
+        if account.auth_mode != expected:
+            return JSONResponse(
+                {"error": "account_auth_mode_conflict"}, status_code=409
+            )
+        return None
+
+    @router.post("/accounts/credentials", status_code=201, response_model=None)
+    async def accounts_create_credentials(
+        request: Request,
+        body: CredentialsCreateRequest,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        result = await authenticated_write(
+            request,
+            session,
+            lambda: request.app.state.account_service.add_credentials(
+                body.label, body.username, body.password, actor=WEBUI_ACTOR
+            ),
+        )
+        if isinstance(result, JSONResponse):
+            return result
+        return account_response(result)
+
+    @router.post("/accounts/token-only", status_code=201, response_model=None)
+    async def accounts_create_token_only(
+        request: Request,
+        body: TokenOnlyCreateRequest,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        result = await authenticated_write(
+            request,
+            session,
+            lambda: request.app.state.account_service.add_token_only(
+                body.label, body.session_token, actor=WEBUI_ACTOR
+            ),
+        )
+        if isinstance(result, JSONResponse):
+            return result
+        return account_response(result)
+
+    @router.patch("/accounts/{account_id}/label", response_model=None)
+    async def account_label_update(
+        account_id: UUID,
+        request: Request,
+        body: LabelUpdateRequest,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        return await account_after(
+            request,
+            account_id,
+            session,
+            lambda: request.app.state.account_service.update_label(
+                account_id, body.label, actor=WEBUI_ACTOR
+            ),
+        )
+
+    @router.patch("/accounts/{account_id}/credentials", response_model=None)
+    async def account_credentials_update(
+        account_id: UUID,
+        request: Request,
+        body: CredentialsUpdateRequest,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        access_error = write_access(request, session)
+        if access_error is not None:
+            return access_error
+        mode_error = await require_account_mode(request, account_id, "credentials")
+        if mode_error is not None:
+            return mode_error
+        return await account_after(
+            request,
+            account_id,
+            session,
+            lambda: request.app.state.account_service.update_credentials(
+                account_id, body.username, body.password, actor=WEBUI_ACTOR
+            ),
+        )
+
+    @router.patch("/accounts/{account_id}/token-only", response_model=None)
+    async def account_token_update(
+        account_id: UUID,
+        request: Request,
+        body: TokenOnlyUpdateRequest,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        access_error = write_access(request, session)
+        if access_error is not None:
+            return access_error
+        mode_error = await require_account_mode(request, account_id, "token_only")
+        if mode_error is not None:
+            return mode_error
+        return await account_after(
+            request,
+            account_id,
+            session,
+            lambda: request.app.state.account_service.update_token_only(
+                account_id, body.session_token, actor=WEBUI_ACTOR
+            ),
+        )
+
+    @router.post("/accounts/{account_id}/enable", response_model=None)
+    async def account_enable(
+        account_id: UUID,
+        request: Request,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        return await account_after(
+            request,
+            account_id,
+            session,
+            lambda: request.app.state.account_service.enable(
+                account_id, actor=WEBUI_ACTOR
+            ),
+        )
+
+    @router.post("/accounts/{account_id}/disable", response_model=None)
+    async def account_disable(
+        account_id: UUID,
+        request: Request,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        return await account_after(
+            request,
+            account_id,
+            session,
+            lambda: request.app.state.account_service.disable(
+                account_id, actor=WEBUI_ACTOR
+            ),
+        )
+
+    @router.post("/accounts/{account_id}/pause", response_model=None)
+    async def account_pause(
+        account_id: UUID,
+        request: Request,
+        body: PauseRequest,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        return await account_after(
+            request,
+            account_id,
+            session,
+            lambda: request.app.state.account_service.pause(
+                account_id, body.reason, actor=WEBUI_ACTOR
+            ),
+        )
+
+    @router.post("/accounts/{account_id}/resume", response_model=None)
+    async def account_resume(
+        account_id: UUID,
+        request: Request,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        return await account_after(
+            request,
+            account_id,
+            session,
+            lambda: request.app.state.account_service.resume(
+                account_id, actor=WEBUI_ACTOR
+            ),
+        )
+
+    @router.delete("/accounts/{account_id}", response_model=None)
+    async def account_remove(
+        account_id: UUID,
+        request: Request,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Any:
+        return await account_after(
+            request,
+            account_id,
+            session,
+            lambda: request.app.state.account_service.disable_drain_remove(
+                account_id, actor=WEBUI_ACTOR
+            ),
+        )
 
     @router.api_route(
         "",
