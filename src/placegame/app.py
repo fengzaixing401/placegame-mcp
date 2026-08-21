@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from .game.client import HttpGameClient
 from .mcp.adapter import create_mcp_server
 from .mcp.auth import StaticBearerAuthMiddleware
 from .policy.store import PostgresPolicyService
+from .scheduler import IdlePreviewScheduler
 from .security.crypto import SecretBox
 
 
@@ -54,6 +56,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.account_status_query = AccountStatusQuery(accounts)
     app.state.idle_plan_use_case = IdlePlanUseCase(accounts, app.state.idle_preview_store)
     app.state.idle_execute_use_case = IdleExecuteUseCase(accounts, app.state.idle_execution_guard, app.state.idle_execution_claims)
+    app.state.idle_preview_scheduler = IdlePreviewScheduler(
+        app.state.database.sessions,
+        accounts,
+        app.state.idle_plan_use_case,
+        worker_id=app.state.settings.scheduler_worker_id,
+        interval_seconds=app.state.settings.scheduler_interval_seconds,
+        lease_seconds=app.state.settings.scheduler_lease_seconds,
+        max_account_concurrency=app.state.settings.max_account_concurrency,
+    )
     app.state.mcp_server = create_mcp_server(
         app.state.account_status_query,
         app.state.idle_plan_use_case,
@@ -67,7 +78,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI):
         try:
             async with _app.state.mcp_server.session_manager.run():
-                yield
+                scheduler = _app.state.idle_preview_scheduler
+                stop = asyncio.Event()
+                task = asyncio.create_task(scheduler.run(stop))
+                try:
+                    yield
+                finally:
+                    stop.set()
+                    await scheduler.close()
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
         finally:
             await _app.state.http_client.aclose()
             await _app.state.database.aclose()

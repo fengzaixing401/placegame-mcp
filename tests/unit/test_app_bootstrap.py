@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from pydantic import SecretStr, ValidationError
 import placegame.app as app_module
 from placegame.app import create_app
 from placegame.config import Settings
+from placegame.scheduler import IdlePreviewScheduler, PostgresIdlePreviewStore
 from tests.fakes.game_server import FakeGameServer
 
 
@@ -79,9 +81,50 @@ class CloseObserver:
         self.events.append(self.event)
 
 
+class SchedulerObserver:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.runs = 0
+        self.closes = 0
+
+    async def run(self, stop) -> None:
+        self.runs += 1
+        self.events.append("scheduler start")
+        await stop.wait()
+
+    async def close(self) -> None:
+        self.closes += 1
+        self.events.append("scheduler close")
+
+
 def install_lifecycle_server(monkeypatch: pytest.MonkeyPatch, events: list[str], **kwargs: Any) -> None:
     server = LifecycleServer(events, **kwargs)
     monkeypatch.setattr(app_module, "create_mcp_server", lambda *args, **_kwargs: server, raising=False)
+
+
+def lifecycle_app(
+    settings: Settings, events: list[str], monkeypatch: pytest.MonkeyPatch, **kwargs: Any
+) -> tuple[Any, SchedulerObserver]:
+    install_lifecycle_server(monkeypatch, events, **kwargs)
+    app = create_app(with_mcp(settings))
+    app.state.http_client = CloseObserver(events, "HTTP close")
+    app.state.database = CloseObserver(events, "database close")
+    scheduler = SchedulerObserver(events)
+    app.state.idle_preview_scheduler = scheduler
+    return app, scheduler
+
+
+def test_app_constructs_a_read_only_idle_preview_scheduler(settings):
+    app = create_app(with_mcp(settings))
+    scheduler = app.state.idle_preview_scheduler
+
+    assert isinstance(scheduler, IdlePreviewScheduler)
+    assert scheduler.idle_preview is app.state.idle_plan_use_case
+    assert scheduler.accounts is app.state.account_service
+    assert scheduler.worker_id == app.state.settings.scheduler_worker_id
+    assert scheduler.interval_seconds == app.state.settings.scheduler_interval_seconds
+    assert scheduler.lease_seconds == app.state.settings.scheduler_lease_seconds
+    assert isinstance(scheduler.store, PostgresIdlePreviewStore)
 
 
 async def test_unauthenticated_mcp_does_not_enter_mcp_lifespan(settings, monkeypatch: pytest.MonkeyPatch):
@@ -98,29 +141,34 @@ async def test_unauthenticated_mcp_does_not_enter_mcp_lifespan(settings, monkeyp
 
 async def test_parent_lifespan_owns_mcp_then_closes_http_and_database_once(settings, monkeypatch: pytest.MonkeyPatch):
     events: list[str] = []
-    install_lifecycle_server(monkeypatch, events)
-    app = create_app(with_mcp(settings))
-    app.state.http_client = CloseObserver(events, "HTTP close")
-    app.state.database = CloseObserver(events, "database close")
+    app, scheduler = lifecycle_app(settings, events, monkeypatch)
 
     async with app.router.lifespan_context(app):
-        pass
+        await asyncio.sleep(0)
 
-    assert events == ["mcp start", "mcp stop", "HTTP close", "database close"]
+    assert events == [
+        "mcp start",
+        "scheduler start",
+        "scheduler close",
+        "mcp stop",
+        "HTTP close",
+        "database close",
+    ]
+    assert (scheduler.runs, scheduler.closes) == (1, 1)
 
 
 async def test_mcp_startup_failure_still_closes_http_and_database_once(settings, monkeypatch: pytest.MonkeyPatch):
     events: list[str] = []
-    install_lifecycle_server(monkeypatch, events, startup_error=RuntimeError("startup failed"))
-    app = create_app(with_mcp(settings))
-    app.state.http_client = CloseObserver(events, "HTTP close")
-    app.state.database = CloseObserver(events, "database close")
+    app, scheduler = lifecycle_app(
+        settings, events, monkeypatch, startup_error=RuntimeError("startup failed")
+    )
 
     with pytest.raises(RuntimeError, match="startup failed"):
         async with app.router.lifespan_context(app):
             pass
 
     assert events == ["mcp start", "HTTP close", "database close"]
+    assert (scheduler.runs, scheduler.closes) == (0, 0)
 
 
 def test_settings_reads_database_url_from_a_nonempty_secret_file(tmp_path: Path):
