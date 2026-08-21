@@ -33,16 +33,23 @@ def admin_database_url(postgres_url, alembic_config):
 async def sessions(admin_database_url):
     engine = create_async_engine(admin_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with engine.begin() as connection:
-        await connection.execute(
-            text(
-                "TRUNCATE TABLE admin_sessions, admin_credentials "
-                "RESTART IDENTITY CASCADE"
+
+    async def truncate() -> None:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "TRUNCATE TABLE admin_sessions, admin_credentials "
+                    "RESTART IDENTITY CASCADE"
+                )
             )
-        )
+
+    await truncate()
     try:
         yield factory
     finally:
+        # admin_credentials is a singleton keyed on id=1, so leaving a row behind
+        # would make any later test that inserts it fail on the primary key.
+        await truncate()
         await engine.dispose()
 
 
