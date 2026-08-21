@@ -13,9 +13,14 @@ from placegame.models import AdminCredential, AdminSession
 
 
 @pytest.fixture
-async def admin_engine(postgres_url, alembic_config):
+def admin_database_url(postgres_url, alembic_config):
     command.upgrade(alembic_config(postgres_url), "head")
-    engine = create_async_engine(postgres_url)
+    return postgres_url
+
+
+@pytest.fixture
+async def admin_engine(admin_database_url):
+    engine = create_async_engine(admin_database_url)
     try:
         yield engine
     finally:
