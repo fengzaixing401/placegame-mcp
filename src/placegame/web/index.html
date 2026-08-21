@@ -31,6 +31,38 @@
       </section>
 
       <section id="console" class="hidden" aria-labelledby="accounts-title">
+        <section class="panel create-panel" aria-labelledby="create-title">
+          <p class="eyebrow">ADD ACCOUNT</p>
+          <h2 id="create-title">Create game account</h2>
+          <p class="muted">Credentials are verified once and are never displayed again.</p>
+          <form id="account-create-form" class="account-form">
+            <div class="field">
+              <label for="account-label">Label</label>
+              <input id="account-label" name="label" maxlength="120" required />
+            </div>
+            <div class="field">
+              <label for="account-auth-mode">Authentication</label>
+              <select id="account-auth-mode" name="authMode">
+                <option value="credentials">Username and password</option>
+                <option value="token_only">Session token</option>
+              </select>
+            </div>
+            <div id="account-username-field" class="field">
+              <label for="account-username">Game username</label>
+              <input id="account-username" name="username" autocomplete="username" />
+            </div>
+            <div id="account-password-field" class="field">
+              <label for="account-password">Game password</label>
+              <input id="account-password" name="password" type="password" autocomplete="new-password" />
+            </div>
+            <div id="account-token-field" class="field hidden">
+              <label for="account-token">Session token</label>
+              <input id="account-token" name="sessionToken" type="password" autocomplete="off" />
+            </div>
+            <button id="account-create-submit" class="primary" type="submit">Create account</button>
+          </form>
+        </section>
+
         <div class="section-heading">
           <div>
             <p class="eyebrow">ACCOUNTS</p>
@@ -41,6 +73,28 @@
         <div id="accounts" class="account-list" aria-live="polite"></div>
       </section>
     </main>
+    <dialog id="edit-dialog" aria-labelledby="edit-dialog-title">
+      <form id="edit-form">
+        <p class="eyebrow">EDIT ACCOUNT</p>
+        <h2 id="edit-dialog-title">Edit game account</h2>
+        <div class="field">
+          <label for="edit-label">Label</label>
+          <input id="edit-label" name="label" maxlength="120" required />
+        </div>
+        <div id="edit-username-field" class="field">
+          <label for="edit-username">Game username (optional)</label>
+          <input id="edit-username" name="username" autocomplete="username" />
+        </div>
+        <div class="field">
+          <label id="edit-secret-label" for="edit-secret">New secret (optional)</label>
+          <input id="edit-secret" name="secret" type="password" autocomplete="new-password" />
+        </div>
+        <div class="dialog-actions">
+          <button id="edit-cancel" type="submit" value="cancel">Cancel</button>
+          <button id="edit-submit" class="primary" type="submit" value="save">Save</button>
+        </div>
+      </form>
+    </dialog>
     <script src="/assets/app.js" defer></script>
   </body>
 </html>

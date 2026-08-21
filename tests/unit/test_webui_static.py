@@ -28,6 +28,17 @@ async def test_root_and_assets_are_public_webui_resources(settings):
     assert css.headers["content-type"].startswith("text/css")
     assert script.status_code == 200
     assert "api/admin/v1" in script.text
+    assert "Create game account" in root.text
+    assert "sessionToken" in script.text
+    assert "/accounts/credentials" in script.text
+    assert "/accounts/token-only" in script.text
+    for action in ("enable", "disable", "pause", "resume"):
+        assert f'"{action}"' in script.text
+    assert "disable_drain_remove" not in script.text
+    assert 'editSecret.type = "password"' in script.text
+    assert 'edit-dialog' in root.text
+    assert 'window.prompt("New game password' not in script.text
+    assert 'window.prompt("New session token' not in script.text
 
 
 async def test_mcp_cookie_boundary_remains_bearer_only(settings):
