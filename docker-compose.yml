@@ -1,0 +1,75 @@
+# 本地/自托管一键运行配置。生产部署请用 deploy/compose.yaml（走预构建镜像与文件型 secrets）。
+#
+# 用法：
+#   cp .env.docker.example .env.docker   # 然后按注释填入生成的密钥
+#   docker compose --env-file .env.docker up -d --build
+#
+# 必须显式指定 --env-file：仓库根目录的 .env 是应用自身的配置文件（pydantic
+# extra="forbid"），把 POSTGRES_PASSWORD 这类仅供 compose 替换的变量写进去，
+# 之后在本地直接运行应用或跑测试会因为未知字段而启动失败。
+
+# 项目名刻意与 deploy/compose.yaml 的 placegame-mcp 区分开：同一台机器上如果已经用
+# deploy/ 跑了生产栈，这份配置不会去接管或替换那些容器。
+name: placegame-mcp-local
+
+x-app: &app
+  build:
+    context: .
+  environment:
+    DATABASE_URL: postgresql+asyncpg://placegame:${POSTGRES_PASSWORD:?请在 .env.docker 中设置 POSTGRES_PASSWORD}@postgres:5432/placegame
+    PLACEGAME_MASTER_KEY_B64: ${PLACEGAME_MASTER_KEY_B64:?请在 .env.docker 中设置 PLACEGAME_MASTER_KEY_B64}
+    PLACEGAME_MCP_TOKEN: ${PLACEGAME_MCP_TOKEN:?请在 .env.docker 中设置 PLACEGAME_MCP_TOKEN}
+    # 通过 HTTP 访问 localhost 时必须为 false，否则浏览器不会保存管理会话 cookie，
+    # 表现为密码正确却始终停在登录页。放到 HTTPS 反向代理后面时改回 true。
+    PLACEGAME_ADMIN_COOKIE_SECURE: ${PLACEGAME_ADMIN_COOKIE_SECURE:-false}
+  networks:
+    - database
+    - egress
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: placegame
+      POSTGRES_USER: placegame
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env.docker 中设置 POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U placegame -d placegame"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *app
+    working_dir: /app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    <<: *app
+    restart: unless-stopped
+    ports:
+      # 只绑定回环地址。需要对外提供服务时请在前面加 HTTPS 反向代理，
+      # 并把 PLACEGAME_ADMIN_COOKIE_SECURE 改为 true。
+      - "127.0.0.1:${PLACEGAME_HTTP_PORT:-18080}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+networks:
+  database:
+    internal: true
+  egress: {}
+
+volumes:
+  postgres_data: {}
