@@ -93,7 +93,7 @@ class BossOptimizer:
                     difficulty=difficulty,
                     selectedSkillKeys=[skill],
                     buffKey=buff,
-                    affixKey=None,
+                    affixKey="none",
                     targetSlot=slot.key,
                     useMaterialBoost=False,
                 )

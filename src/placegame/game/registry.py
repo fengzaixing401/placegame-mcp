@@ -10,6 +10,10 @@ OperationName = Literal[
     "idle_summary",
     "view_sections",
     "idle_collect",
+    "equipment_list",
+    "equipment_decompose_preview",
+    "equipment_enhance_preview",
+    "equipment_quality_upgrade_preview",
     "boss_preview",
     "boss_challenge",
     "boss_assist",
@@ -38,7 +42,19 @@ REGISTRY: Mapping[OperationName, EndpointSpec] = MappingProxyType(
         "catalog": EndpointSpec("GET", "/api/client/catalog", mutation=False),
         "idle_summary": EndpointSpec("GET", "/api/client/idle-summary", mutation=False),
         "view_sections": EndpointSpec("POST", "/api/client/view-sections", mutation=False),
-        "idle_collect": EndpointSpec("POST", "/api/battle/idle-collect", mutation=True),
+        "idle_collect": EndpointSpec("POST", "/api/client/collect", mutation=True),
+        # Equipment reads. Every destructive equipment action has a matching
+        # preview, and a preview changes nothing, so these are the safe half.
+        "equipment_list": EndpointSpec("GET", "/api/equipment/list", mutation=False),
+        "equipment_decompose_preview": EndpointSpec(
+            "POST", "/api/equipment/decompose-preview", mutation=False
+        ),
+        "equipment_enhance_preview": EndpointSpec(
+            "POST", "/api/equipment/enhance-preview", mutation=False
+        ),
+        "equipment_quality_upgrade_preview": EndpointSpec(
+            "POST", "/api/equipment/quality-upgrade-preview", mutation=False
+        ),
         "boss_preview": EndpointSpec("POST", "/api/boss/preview", mutation=False),
         "boss_challenge": EndpointSpec("POST", "/api/boss/challenge", mutation=True),
         "boss_assist": EndpointSpec("POST", "/api/boss/assist", mutation=True),

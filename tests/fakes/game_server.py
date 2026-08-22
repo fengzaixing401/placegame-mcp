@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
+from collections.abc import Sequence
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -29,6 +30,7 @@ from placegame.game.schemas import (
     GameUser,
     IdleCollectResult,
     IdleSummary,
+    PassthroughResult,
     LoginResult,
     ProfessionQueueResult,
     ProfessionSettleResult,
@@ -450,6 +452,22 @@ class _FakeGameApi:
     async def catalog(self) -> Catalog:
         raise NotImplementedError("catalog is not needed by the account fake")
 
+    async def equipment_list(self) -> PassthroughResult:
+        raise NotImplementedError("equipment reads are not needed by the account fake")
+
+    async def equipment_decompose_preview(
+        self, equipment_ids: Sequence[str]
+    ) -> PassthroughResult:
+        raise NotImplementedError("equipment reads are not needed by the account fake")
+
+    async def equipment_enhance_preview(self, equipment_id: str) -> PassthroughResult:
+        raise NotImplementedError("equipment reads are not needed by the account fake")
+
+    async def equipment_quality_upgrade_preview(
+        self, equipment_id: str
+    ) -> PassthroughResult:
+        raise NotImplementedError("equipment reads are not needed by the account fake")
+
     async def view_sections(
         self,
         sections: tuple[str, ...],
@@ -469,7 +487,7 @@ class _FakeGameApi:
         if key in self._factory._ambiguous:
             self._factory._ambiguous.remove(key)
             raise AmbiguousMutation("idle_collect")
-        return IdleCollectResult(collected=True)
+        return IdleCollectResult()
 
     async def boss_preview(self, request: BossPreviewRequest) -> BossPreview:
         self._factory.preview_count += 1

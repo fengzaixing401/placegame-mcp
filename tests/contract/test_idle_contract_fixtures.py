@@ -18,8 +18,7 @@ FIXTURE_DIRECTORY = Path(__file__).parents[1] / "fixtures" / "game" / "v1"
     [
         ("bootstrap.json", "/api/client/bootstrap", BootstrapState, True),
         ("idle-summary.json", "/api/client/idle-summary", IdleSummary, True),
-        # No authorised capture of a collection exists yet, so this shape is a guess.
-        ("idle-collect.json", "/api/battle/idle-collect", IdleCollectResult, False),
+        ("idle-collect.json", "/api/client/collect", IdleCollectResult, True),
     ],
 )
 def test_idle_contract_fixture_is_synthetic_schema_valid_and_redacted(
@@ -63,18 +62,29 @@ def test_a_business_failure_envelope_is_not_reported_as_a_broken_contract() -> N
 
 
 def test_a_mutation_result_envelope_is_unwrapped_to_its_result() -> None:
-    """Mutations answer with data = {"result": ..., "statePatch": ...}."""
+    """Mutations answer with data = {"result": ..., "statePatch": ...}.
+
+    The shape mirrors a live collection: the payload sits under `result`, with a
+    sibling `statePatch` and an envelope-level `changedSections`.
+    """
 
     decoded = _interpret_response(
         httpx.Response(
             200,
             json={
                 "ok": True,
-                "data": {"result": {"collected": True}, "statePatch": {"gold": 1}},
+                "data": {
+                    "result": {"rewardPreview": {"gold": 7}, "adventure": None},
+                    "statePatch": {"player": {"gold": 7}},
+                },
+                "changedSections": ["player"],
             },
         ),
         IdleCollectResult,
     )
 
     assert isinstance(decoded, IdleCollectResult)
-    assert decoded.collected is True
+    extra = decoded.model_extra or {}
+    assert extra["rewardPreview"] == {"gold": 7}
+    # statePatch belongs to the envelope, not the operation's own payload.
+    assert "statePatch" not in extra

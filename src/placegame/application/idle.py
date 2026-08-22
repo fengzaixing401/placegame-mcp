@@ -415,7 +415,7 @@ class IdleExecuteUseCase:
                 outcome = "precondition_failed"
             else:
                 try:
-                    response = await locked.api.idle_collect()  # type: ignore[attr-defined]
+                    await locked.api.idle_collect()  # type: ignore[attr-defined]
                     after = await locked.api.idle_summary()  # type: ignore[attr-defined]
                 except Exception:
                     try:
@@ -430,9 +430,11 @@ class IdleExecuteUseCase:
                             else "reconciliation_required"
                         )
                 else:
+                    # A drop in accumulated idle time is the observable proof that
+                    # the collection landed. The response carries no success flag.
                     outcome = (
                         "reconciliation_required"
-                        if not response.collected or after.accumulated_seconds >= before.accumulated_seconds
+                        if after.accumulated_seconds >= before.accumulated_seconds
                         else "executed"
                     )
         if outcome == "precondition_failed":

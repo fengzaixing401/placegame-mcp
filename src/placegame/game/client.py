@@ -2,7 +2,7 @@ import asyncio
 import random
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Final, Literal, Protocol, TypeVar
@@ -40,11 +40,14 @@ from .schemas import (
     Catalog,
     CodexClaimRequest,
     DailyClaimRequest,
+    EquipmentIdRequest,
+    EquipmentIdsRequest,
     IdleCollectResult,
     IdleSummary,
     LoginRequest,
     LoginResult,
     MailClaimRequest,
+    PassthroughResult,
     ProfessionEnqueueRequest,
     ProfessionQueueResult,
     ProfessionSettleResult,
@@ -123,6 +126,16 @@ class GameApi(Protocol):
     async def profession_state(self) -> ProfessionState: ...
     async def reward_state(self) -> RewardState: ...
     async def idle_collect(self) -> IdleCollectResult: ...
+    async def equipment_list(self) -> PassthroughResult: ...
+    async def equipment_decompose_preview(
+        self, equipment_ids: Sequence[str]
+    ) -> PassthroughResult: ...
+    async def equipment_enhance_preview(
+        self, equipment_id: str
+    ) -> PassthroughResult: ...
+    async def equipment_quality_upgrade_preview(
+        self, equipment_id: str
+    ) -> PassthroughResult: ...
     async def boss_preview(self, request: BossPreviewRequest) -> BossPreview: ...
     async def boss_challenge(
         self, request: BossChallengeRequest
@@ -194,6 +207,16 @@ class _Failure:
 @dataclass(frozen=True)
 class _TransportFailure:
     pass
+
+
+@dataclass(frozen=True)
+class _ConnectFailure:
+    """The connection was never established, so the request never reached the game.
+
+    A mutation is only ambiguous once it may have been acted on. Failing to connect
+    carries no such doubt, so these are safe to retry even for a mutation — and on
+    a flaky link they are the common case.
+    """
 
 
 def _safe_error_code(response: httpx.Response) -> str | None:
@@ -395,6 +418,8 @@ class HttpGameClient:
                     timeout=self._timeout,
                     json=payload,
                 )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            return _ConnectFailure()
         except httpx.HTTPError:
             return _TransportFailure()
 
@@ -426,15 +451,18 @@ class HttpGameClient:
         payload = None
         if body is not None:
             payload = body.model_dump(mode="json", by_alias=True, exclude_none=True)
-        attempts = 1 if spec.mutation else 3
+        # A mutation may not be replayed once it could have been acted on, but a
+        # connection that never opened is retryable whatever the operation is.
+        attempts = 3
 
         for attempt in range(attempts):
             result = await self._send_once(operation, payload)
-            if isinstance(result, _TransportFailure):
-                if spec.mutation:
+            if isinstance(result, (_TransportFailure, _ConnectFailure)):
+                connect_only = isinstance(result, _ConnectFailure)
+                if spec.mutation and not connect_only:
                     return _Failure("ambiguous")
                 if attempt == attempts - 1:
-                    return _Failure("unavailable")
+                    return _Failure("ambiguous" if spec.mutation else "unavailable")
                 await self._sleeper((2**attempt) * 0.1 + self._jitter() * 0.1)
                 continue
 
@@ -511,6 +539,34 @@ class HttpGameClient:
 
     async def idle_collect(self) -> IdleCollectResult:
         return await self._request("idle_collect", IdleCollectResult)
+
+    async def equipment_list(self) -> PassthroughResult:
+        return await self._request("equipment_list", PassthroughResult)
+
+    async def equipment_decompose_preview(
+        self, equipment_ids: Sequence[str]
+    ) -> PassthroughResult:
+        return await self._request(
+            "equipment_decompose_preview",
+            PassthroughResult,
+            EquipmentIdsRequest(equipmentIds=list(equipment_ids)),
+        )
+
+    async def equipment_enhance_preview(self, equipment_id: str) -> PassthroughResult:
+        return await self._request(
+            "equipment_enhance_preview",
+            PassthroughResult,
+            EquipmentIdRequest(equipmentId=equipment_id),
+        )
+
+    async def equipment_quality_upgrade_preview(
+        self, equipment_id: str
+    ) -> PassthroughResult:
+        return await self._request(
+            "equipment_quality_upgrade_preview",
+            PassthroughResult,
+            EquipmentIdRequest(equipmentId=equipment_id),
+        )
 
     async def boss_preview(self, request: BossPreviewRequest) -> BossPreview:
         return await self._request("boss_preview", BossPreview, request)

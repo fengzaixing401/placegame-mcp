@@ -19,13 +19,22 @@ class ViewSectionsRequest(RequestModel):
 
 
 class BossPreviewRequest(RequestModel):
+    """Mirrors the official CLI's bossFields(): only bossKey is required.
+
+    Difficulty and buff keys are not enumerated here because the live set comes
+    from `view_sections`' `difficultyOptions`; a local allow-list would reject
+    values the game adds. `affixKey` defaults to the string "none", not null.
+    """
+
     boss_key: str = Field(alias="bossKey", min_length=1)
-    difficulty: Literal["normal", "hard", "nightmare"]
-    selected_skill_keys: list[str] = Field(alias="selectedSkillKeys", max_length=3)
-    buff_key: Literal["none", "assault", "guard", "focus"] = Field(alias="buffKey")
-    affix_key: str | None = Field(alias="affixKey")
-    target_slot: str = Field(alias="targetSlot", min_length=1)
-    use_material_boost: bool = Field(alias="useMaterialBoost")
+    difficulty: str = "normal"
+    selected_skill_keys: list[str] = Field(
+        default_factory=list, alias="selectedSkillKeys"
+    )
+    buff_key: str = Field(default="none", alias="buffKey")
+    affix_key: str = Field(default="none", alias="affixKey")
+    target_slot: str | None = Field(default=None, alias="targetSlot")
+    use_material_boost: bool = Field(default=False, alias="useMaterialBoost")
 
 
 class BossChallengeRequest(BossPreviewRequest):
@@ -166,7 +175,34 @@ class ViewSections(ResponseData):
 
 
 class IdleCollectResult(ResponseData):
-    collected: bool
+    """A collection answers with {adventure, rewardPreview, profile}.
+
+    Observed on 2026-08-22 from a live capture; there is no `collected` flag. The
+    payload is passed through rather than modelled, because nothing here is a
+    control-flow input and a wrong required field would fail a real collection.
+    """
+
+
+class EquipmentListRequest(RequestModel):
+    """`/api/equipment/list` is a GET and takes no parameters."""
+
+
+class EquipmentIdRequest(RequestModel):
+    equipment_id: str = Field(alias="equipmentId", min_length=1, max_length=128)
+
+
+class EquipmentIdsRequest(RequestModel):
+    equipment_ids: list[str] = Field(alias="equipmentIds", min_length=1, max_length=200)
+
+
+class PassthroughResult(ResponseData):
+    """An unmodelled payload.
+
+    Used where nothing in the response feeds a decision this service makes. The
+    live shapes are unverified, and a required field guessed wrong fails the whole
+    call, so requiring nothing is the safe choice: `extra="allow"` still carries
+    every field through to the caller.
+    """
 
 
 class BossPreview(ResponseData):

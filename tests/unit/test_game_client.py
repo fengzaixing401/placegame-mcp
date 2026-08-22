@@ -75,7 +75,7 @@ VALID_RESPONSES: dict[str, dict[str, Any]] = {
         "sectionEtags": {"bosses": "bosses-etag"},
         "bosses": [VALID_PERSONAL_BOSS, VALID_MAP_BOSS, VALID_WORLD_BOSS],
     },
-    "idle_collect": {"collected": True},
+    "idle_collect": {"rewardPreview": {"gold": 1}, "adventure": None},
     "boss_preview": {
         "predictedWin": True,
         "chance": 87.5,
@@ -170,7 +170,23 @@ def test_registry_contains_exact_approved_operations_and_is_read_only():
         "catalog": ("GET", "/api/client/catalog", False),
         "idle_summary": ("GET", "/api/client/idle-summary", False),
         "view_sections": ("POST", "/api/client/view-sections", False),
-        "idle_collect": ("POST", "/api/battle/idle-collect", True),
+        "idle_collect": ("POST", "/api/client/collect", True),
+        "equipment_list": ("GET", "/api/equipment/list", False),
+        "equipment_decompose_preview": (
+            "POST",
+            "/api/equipment/decompose-preview",
+            False,
+        ),
+        "equipment_enhance_preview": (
+            "POST",
+            "/api/equipment/enhance-preview",
+            False,
+        ),
+        "equipment_quality_upgrade_preview": (
+            "POST",
+            "/api/equipment/quality-upgrade-preview",
+            False,
+        ),
         "boss_preview": ("POST", "/api/boss/preview", False),
         "boss_challenge": ("POST", "/api/boss/challenge", True),
         "boss_assist": ("POST", "/api/boss/assist", True),
@@ -247,7 +263,7 @@ async def test_all_fixed_post_bodies_use_exact_api_aliases(fake_game, game_clien
         difficulty="nightmare",
         selectedSkillKeys=["skill-3"],
         buffKey="focus",
-        affixKey=None,
+        affixKey="none",
         targetSlot="armor",
         useMaterialBoost=True,
     )
@@ -292,6 +308,7 @@ async def test_all_fixed_post_bodies_use_exact_api_aliases(fake_game, game_clien
                 "difficulty": "nightmare",
                 "selectedSkillKeys": ["skill-3"],
                 "buffKey": "focus",
+                "affixKey": "none",
                 "targetSlot": "armor",
                 "useMaterialBoost": True,
             },
@@ -395,7 +412,6 @@ async def test_fake_recursively_redacts_future_body_and_header_credentials(fake_
             "view_sections",
             lambda client: client.view_sections(("bosses",)),
         ),
-        ("POST", "/api/battle/idle-collect", "idle_collect", lambda client: client.idle_collect()),
         (
             "POST",
             "/api/boss/preview",
@@ -406,7 +422,7 @@ async def test_fake_recursively_redacts_future_body_and_header_credentials(fake_
                     difficulty="normal",
                     selectedSkillKeys=[],
                     buffKey="none",
-                    affixKey=None,
+                    affixKey="none",
                     targetSlot="weapon",
                     useMaterialBoost=False,
                 )
@@ -422,7 +438,7 @@ async def test_fake_recursively_redacts_future_body_and_header_credentials(fake_
                     difficulty="normal",
                     selectedSkillKeys=[],
                     buffKey="none",
-                    affixKey=None,
+                    affixKey="none",
                     targetSlot="weapon",
                     useMaterialBoost=False,
                 )
@@ -486,7 +502,7 @@ async def test_missing_required_response_core_becomes_schema_mismatch(
                     difficulty="normal",
                     selectedSkillKeys=[],
                     buffKey="none",
-                    affixKey=None,
+                    affixKey="none",
                     targetSlot="weapon",
                     useMaterialBoost=False,
                 )
@@ -549,7 +565,7 @@ async def test_boss_preview_rejects_incomplete_or_invalid_ranking_signals(
                 difficulty="hard",
                 selectedSkillKeys=[],
                 buffKey="none",
-                affixKey=None,
+                affixKey="none",
                 targetSlot="weapon",
                 useMaterialBoost=False,
             )
@@ -683,7 +699,7 @@ async def test_get_and_post_reads_each_retry_exactly_three_timeouts(fake_game, g
                 difficulty="normal",
                 selectedSkillKeys=[],
                 buffKey="none",
-                affixKey=None,
+                affixKey="none",
                 targetSlot="weapon",
                 useMaterialBoost=False,
             )
@@ -703,7 +719,7 @@ async def test_get_and_post_reads_each_retry_exactly_three_timeouts(fake_game, g
     ("path", "call"),
     [
         ("/api/auth/login", lambda client: client.login("user", "password")),
-        ("/api/battle/idle-collect", lambda client: client.idle_collect()),
+        ("/api/client/collect", lambda client: client.idle_collect()),
     ],
 )
 async def test_login_and_mutation_timeout_once_and_are_ambiguous(
@@ -793,13 +809,13 @@ async def test_read_5xx_is_typed_and_mutation_5xx_is_ambiguous(fake_game, game_c
         await game_client.catalog()
     assert_public_error_is_contained(read_error.value)
 
-    fake_game.register("POST", "/api/battle/idle-collect", {"error": {}}, status_code=503)
+    fake_game.register("POST", "/api/client/collect", {"error": {}}, status_code=503)
     with pytest.raises(AmbiguousMutation) as mutation_error:
         await game_client.idle_collect()
     assert_public_error_is_contained(mutation_error.value)
     assert [request.path for request in fake_game.requests] == [
         "/api/client/catalog",
-        "/api/battle/idle-collect",
+        "/api/client/collect",
     ]
 
 
@@ -808,7 +824,7 @@ async def test_mutation_5xx_is_ambiguous_regardless_of_error_envelope(
 ):
     fake_game.register(
         "POST",
-        "/api/battle/idle-collect",
+        "/api/client/collect",
         {"error": {"code": "inventory_full"}},
         status_code=503,
     )
@@ -817,7 +833,7 @@ async def test_mutation_5xx_is_ambiguous_regardless_of_error_envelope(
         await game_client.idle_collect()
 
     assert [request.path for request in fake_game.requests] == [
-        "/api/battle/idle-collect"
+        "/api/client/collect"
     ]
 
 
@@ -1004,6 +1020,118 @@ def test_the_version_holder_refuses_an_implausible_version(candidate: str):
 def test_the_version_holder_rejects_an_implausible_seed():
     with pytest.raises(ValueError):
         GameClientVersion("not-a-version")
+
+
+async def test_equipment_reads_send_the_documented_bodies(fake_game, game_client):
+    for method, path, key in (
+        ("GET", "/api/equipment/list", "equipment_read"),
+        ("POST", "/api/equipment/decompose-preview", "equipment_read"),
+        ("POST", "/api/equipment/enhance-preview", "equipment_read"),
+        ("POST", "/api/equipment/quality-upgrade-preview", "equipment_read"),
+    ):
+        fake_game.register(method, path, {"ok": True, "data": {"gold": 5}})
+
+    await game_client.equipment_list()
+    await game_client.equipment_decompose_preview(["eq-1", "eq-2"])
+    await game_client.equipment_enhance_preview("eq-3")
+    await game_client.equipment_quality_upgrade_preview("eq-4")
+
+    assert [
+        (request.method, request.path, request.json_body)
+        for request in fake_game.requests
+    ] == [
+        ("GET", "/api/equipment/list", None),
+        (
+            "POST",
+            "/api/equipment/decompose-preview",
+            {"equipmentIds": ["eq-1", "eq-2"]},
+        ),
+        ("POST", "/api/equipment/enhance-preview", {"equipmentId": "eq-3"}),
+        ("POST", "/api/equipment/quality-upgrade-preview", {"equipmentId": "eq-4"}),
+    ]
+
+
+async def test_an_unmodelled_equipment_payload_survives_intact(fake_game, game_client):
+    """A passthrough result must not drop fields we did not anticipate."""
+
+    payload = {"gold": 12, "materials": [{"itemKey": "shard", "amount": 3}]}
+    fake_game.register(
+        "POST", "/api/equipment/decompose-preview", {"ok": True, "data": payload}
+    )
+
+    result = await game_client.equipment_decompose_preview(["eq-1"])
+
+    assert result.model_extra == payload
+
+
+async def test_equipment_reads_are_not_registered_as_mutations():
+    """A preview changes nothing, so it must keep the read retry policy."""
+
+    for name in (
+        "equipment_list",
+        "equipment_decompose_preview",
+        "equipment_enhance_preview",
+        "equipment_quality_upgrade_preview",
+    ):
+        assert REGISTRY[name].mutation is False
+
+
+async def test_a_mutation_retries_a_connection_that_never_opened(settings):
+    """Failing to connect carries no doubt about what the game did."""
+
+    attempts = 0
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ConnectTimeout("connect timed out", request=request)
+        return httpx.Response(200, json=valid_envelope("login"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = HttpGameClient(
+            settings, http_client=http, request_spacing_seconds=0, sleeper=_sleep_now
+        )
+        result = await client.login("user", "password")
+
+    assert result.session_token == "new-session-token"
+    assert attempts == 3
+
+
+async def test_a_mutation_that_kept_failing_to_connect_is_still_ambiguous(settings):
+    async def respond(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = HttpGameClient(
+            settings, http_client=http, request_spacing_seconds=0, sleeper=_sleep_now
+        )
+        with pytest.raises(AmbiguousMutation):
+            await client.login("user", "password")
+
+
+async def test_a_mutation_that_was_sent_but_timed_out_is_not_retried(settings):
+    """A read timeout means the game may already have acted, so it stands alone."""
+
+    attempts = 0
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("read timed out", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = HttpGameClient(
+            settings, http_client=http, request_spacing_seconds=0, sleeper=_sleep_now
+        )
+        with pytest.raises(AmbiguousMutation):
+            await client.idle_collect()
+
+    assert attempts == 1
+
+
+async def _sleep_now(_delay: float) -> None:
+    return None
 
 
 async def _noop() -> None:
