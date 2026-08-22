@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 
 class RequestModel(BaseModel):
@@ -195,14 +195,17 @@ class EquipmentIdsRequest(RequestModel):
     equipment_ids: list[str] = Field(alias="equipmentIds", min_length=1, max_length=200)
 
 
-class PassthroughResult(ResponseData):
-    """An unmodelled payload.
+class PassthroughResult(RootModel[Any]):
+    """An unmodelled payload of any JSON shape.
 
-    Used where nothing in the response feeds a decision this service makes. The
-    live shapes are unverified, and a required field guessed wrong fails the whole
-    call, so requiring nothing is the safe choice: `extra="allow"` still carries
-    every field through to the caller.
+    Used where nothing in the response feeds a decision this service makes. A
+    root model is deliberate: some of these endpoints answer with a bare array,
+    which no field-bearing model can hold. The live shapes are unverified, and a
+    required field guessed wrong fails the whole call, so requiring nothing is
+    the safe choice.
     """
+
+    model_config = ConfigDict(strict=True)
 
 
 class BossPreview(ResponseData):

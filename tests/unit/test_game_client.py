@@ -1061,7 +1061,25 @@ async def test_an_unmodelled_equipment_payload_survives_intact(fake_game, game_c
 
     result = await game_client.equipment_decompose_preview(["eq-1"])
 
-    assert result.model_extra == payload
+    assert result.root == payload
+
+
+async def test_an_equipment_list_answers_with_a_bare_array(fake_game, game_client):
+    """`/api/equipment/list` returns `data` as a list, not an object.
+
+    Observed live on 2026-08-23. A field-bearing model cannot hold this, which is
+    why the passthrough is a root model.
+    """
+
+    rows = [
+        {"id": "eq-1", "slot": "weapon", "locked": False, "score": 10},
+        {"id": "eq-2", "slot": "armor", "locked": True, "score": 20},
+    ]
+    fake_game.register("GET", "/api/equipment/list", {"ok": True, "data": rows})
+
+    result = await game_client.equipment_list()
+
+    assert result.root == rows
 
 
 async def test_equipment_reads_are_not_registered_as_mutations():
