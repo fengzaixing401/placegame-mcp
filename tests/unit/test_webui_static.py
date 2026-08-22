@@ -28,7 +28,10 @@ async def test_root_and_assets_are_public_webui_resources(settings):
     assert css.headers["content-type"].startswith("text/css")
     assert script.status_code == 200
     assert "api/admin/v1" in script.text
-    assert "创建游戏账号" in root.text
+    assert "添加游戏账号" in root.text
+    # The account already exists in the game; this console only takes it under
+    # management, so the copy must not promise to create one.
+    assert "创建游戏账号" not in root.text
     assert 'lang="zh-CN"' in root.text
     assert "sessionToken" in script.text
     assert "/accounts/credentials" in script.text
