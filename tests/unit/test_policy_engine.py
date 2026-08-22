@@ -20,7 +20,7 @@ SHANGHAI_NOW = datetime(2026, 8, 17, 10, 0, tzinfo=SHANGHAI)
 
 class IdleApi:
     def __init__(self) -> None:
-        self.idle_summary_result: object = IdleSummary(accumulatedSeconds=0, capacitySeconds=720 * 60)
+        self.idle_summary_result: object = IdleSummary(validSeconds=0, capacitySeconds=720 * 60)
         self.mutation_calls: list[str] = []
 
     async def idle_summary(self):
@@ -41,7 +41,7 @@ def locked(api: IdleApi) -> LockedAccount:
 
 async def test_idle_threshold_is_minimum_of_policy_and_server_capacity():
     api = IdleApi()
-    api.idle_summary_result = IdleSummary(accumulatedSeconds=710 * 60, capacitySeconds=720 * 60)
+    api.idle_summary_result = IdleSummary(validSeconds=710 * 60, capacitySeconds=720 * 60)
     plan = await PolicyEngine().build_idle_plan(locked(api), now=SHANGHAI_NOW)
 
     assert plan.family == "idle"

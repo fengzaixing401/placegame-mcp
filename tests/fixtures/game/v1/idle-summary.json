@@ -2,12 +2,25 @@
   "provenance": "synthetic",
   "endpoint": "/api/client/idle-summary",
   "created_at": "2026-08-19T00:00:00Z",
+  "shape_verified_at": "2026-08-22T00:00:00Z",
+  "shape_source": "redacted HAR capture of the live web client",
   "verified_at": null,
   "game_contract_version": "unverified",
   "redaction_method": "placegame.security.redaction.redact",
   "live_contract_status": "unverified",
-  "data": {
-    "accumulatedSeconds": 0,
-    "capacitySeconds": 1
+  "response": {
+    "ok": true,
+    "data": {
+      "validSeconds": 0.0,
+      "efficiency": 1.0,
+      "exp": 0,
+      "gold": 0,
+      "killCount": 0,
+      "dropCount": 0
+    },
+    "user": {
+      "id": "synthetic-account",
+      "username": "synthetic"
+    }
   }
 }

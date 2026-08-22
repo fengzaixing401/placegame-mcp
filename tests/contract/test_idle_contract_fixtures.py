@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import BaseModel
 
+from placegame.game.client import _interpret_response
 from placegame.game.schemas import BootstrapState, IdleCollectResult, IdleSummary
 from placegame.security.redaction import redact
 
@@ -12,15 +14,16 @@ FIXTURE_DIRECTORY = Path(__file__).parents[1] / "fixtures" / "game" / "v1"
 
 
 @pytest.mark.parametrize(
-    ("filename", "endpoint", "schema"),
+    ("filename", "endpoint", "schema", "shape_verified"),
     [
-        ("bootstrap.json", "/api/client/bootstrap", BootstrapState),
-        ("idle-summary.json", "/api/client/idle-summary", IdleSummary),
-        ("idle-collect.json", "/api/battle/idle-collect", IdleCollectResult),
+        ("bootstrap.json", "/api/client/bootstrap", BootstrapState, True),
+        ("idle-summary.json", "/api/client/idle-summary", IdleSummary, True),
+        # No authorised capture of a collection exists yet, so this shape is a guess.
+        ("idle-collect.json", "/api/battle/idle-collect", IdleCollectResult, False),
     ],
 )
 def test_idle_contract_fixture_is_synthetic_schema_valid_and_redacted(
-    filename: str, endpoint: str, schema: type[BaseModel]
+    filename: str, endpoint: str, schema: type[BaseModel], shape_verified: bool
 ) -> None:
     document = json.loads((FIXTURE_DIRECTORY / filename).read_text(encoding="utf-8"))
 
@@ -32,4 +35,46 @@ def test_idle_contract_fixture_is_synthetic_schema_valid_and_redacted(
     assert document["redaction_method"] == "placegame.security.redaction.redact"
     assert document["live_contract_status"] == "unverified"
     assert redact(document) == document
-    schema.model_validate(document["data"])
+
+    if shape_verified:
+        assert document["shape_verified_at"] == "2026-08-22T00:00:00Z"
+        assert document["shape_source"] == "redacted HAR capture of the live web client"
+    else:
+        assert document["shape_verified_at"] is None
+        assert document["shape_source"] is None
+
+    # Decoded through the client so the fixture proves the real parsing path, not a
+    # second implementation of it.
+    decoded = _interpret_response(
+        httpx.Response(200, json=document["response"]), schema
+    )
+    assert isinstance(decoded, schema)
+
+
+def test_a_business_failure_envelope_is_not_reported_as_a_broken_contract() -> None:
+    """A 200 carrying ok:false is an ordinary refusal, not a schema mismatch."""
+
+    decoded = _interpret_response(
+        httpx.Response(200, json={"ok": False, "error": "背包已满。"}), IdleCollectResult
+    )
+
+    assert not isinstance(decoded, IdleCollectResult)
+    assert decoded.kind == "conflict"
+
+
+def test_a_mutation_result_envelope_is_unwrapped_to_its_result() -> None:
+    """Mutations answer with data = {"result": ..., "statePatch": ...}."""
+
+    decoded = _interpret_response(
+        httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "data": {"result": {"collected": True}, "statePatch": {"gold": 1}},
+            },
+        ),
+        IdleCollectResult,
+    )
+
+    assert isinstance(decoded, IdleCollectResult)
+    assert decoded.collected is True

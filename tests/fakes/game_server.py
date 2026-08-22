@@ -26,6 +26,7 @@ from placegame.game.schemas import (
     BossState,
     BootstrapState,
     Catalog,
+    GameUser,
     IdleCollectResult,
     IdleSummary,
     LoginResult,
@@ -386,11 +387,11 @@ class _FakeGameApi:
         if redirected_token is not None:
             state = self._factory._states_by_token[redirected_token]
             self._factory.allow_account_session(state.runtime_id)
-            return LoginResult(token=redirected_token)
+            return LoginResult(sessionToken=redirected_token)
         for state in self._factory._states_by_id.values():
             if state.username == username and state.password == password:
                 self._factory.allow_account_session(state.runtime_id)
-                return LoginResult(token=state.token)
+                return LoginResult(sessionToken=state.token)
         raise SessionRejected()
 
     async def bootstrap(self) -> BootstrapState:
@@ -405,7 +406,7 @@ class _FakeGameApi:
         self._factory._bootstrap_counts[state.runtime_id] = (
             self._factory._bootstrap_counts.get(state.runtime_id, 0) + 1
         )
-        return BootstrapState(accountId=str(state.account_id))
+        return BootstrapState(user=GameUser(id=str(state.account_id)))
 
     async def idle_summary(self) -> IdleSummary:
         state = self._factory._state_for_token(self._session_token)
@@ -418,7 +419,7 @@ class _FakeGameApi:
             self._factory._idle_summary_counts.get(state.runtime_id, 0) + 1
         )
         return IdleSummary(
-            accumulatedSeconds=state.accumulated_seconds,
+            validSeconds=float(state.accumulated_seconds),
             capacitySeconds=state.capacity_seconds,
         )
 
