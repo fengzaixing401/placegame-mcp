@@ -255,7 +255,13 @@ class IdlePlanner:
 
     @staticmethod
     def threshold(policy: VersionedPolicy, idle: IdleSummary) -> int:
-        return min(policy.idle_threshold_minutes * 60, idle.capacity_seconds)
+        configured = policy.idle_threshold_minutes * 60
+        if idle.capacity_seconds is None:
+            # The live game reports no ceiling, and it already reports only the
+            # seconds it considers collectible. Clamping to a guessed cap would
+            # make collection fire earlier than the operator asked for.
+            return configured
+        return min(configured, idle.capacity_seconds)
 
     def decision(self, idle: IdleSummary, policy: VersionedPolicy) -> Literal["collect", "wait"]:
         return "collect" if idle.accumulated_seconds >= self.threshold(policy, idle) else "wait"

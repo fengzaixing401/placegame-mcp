@@ -22,6 +22,32 @@ def test_idle_planner_uses_capacity_bound_threshold_and_stable_eligibility_finge
     assert planner.fingerprint(first, policy) == planner.fingerprint(later, policy)
 
 
+def test_a_missing_capacity_leaves_the_operator_policy_in_charge():
+    """The live game reports no ceiling, so nothing may clamp the policy."""
+
+    from placegame.application.idle import IdlePlanner
+
+    planner = IdlePlanner()
+    policy = VersionedPolicy(version=3, idle_threshold_minutes=690)
+    # A real account was observed here, past any 8-hour cap we might have assumed.
+    observed = IdleSummary(validSeconds=37760.265)
+
+    assert observed.capacity_seconds is None
+    assert planner.threshold(policy, observed) == 690 * 60
+    # 37760s is under the 41400s policy threshold, so it must still be a wait. A
+    # guessed 28800s cap would have wrongly reported this as collectible.
+    assert planner.decision(observed, policy) == "wait"
+
+
+def test_a_server_sent_capacity_still_clamps_the_threshold():
+    from placegame.application.idle import IdlePlanner
+
+    policy = VersionedPolicy(version=3, idle_threshold_minutes=690)
+    capped = IdleSummary(validSeconds=100, capacitySeconds=60)
+
+    assert IdlePlanner().threshold(policy, capped) == 60
+
+
 def test_idle_planner_builds_exactly_one_safe_collect_action():
     from placegame.application.idle import IdlePlanner
 
