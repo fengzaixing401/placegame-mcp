@@ -33,7 +33,7 @@
     unauthorized: "会话已过期，请重新登录。",
     account_not_found: "账号不存在。",
     game_unavailable: "游戏服务暂时不可用。",
-    game_contract_changed: "游戏返回结构已变化，请刷新后重试。",
+    game_contract_changed: "游戏接口返回的结构与本服务的预期不符，重试无效，需要先更新接口契约。",
     account_auth_mode_conflict: "请使用与该账号当前认证方式匹配的编辑入口。",
     account_identity_conflict: "该游戏账号已在此处管理。",
     authentication_required: "游戏凭据被拒绝。",

@@ -43,6 +43,8 @@ async def test_root_and_assets_are_public_webui_resources(settings):
     assert "/auth/password" in script.text
     assert "password_too_short" in script.text
     assert "setup_already_complete" in script.text
+    # A contract mismatch is deterministic, so the copy must not suggest retrying.
+    assert "请刷新后重试" not in script.text
     assert 'window.prompt("New game password' not in script.text
     assert 'window.prompt("New session token' not in script.text
 
