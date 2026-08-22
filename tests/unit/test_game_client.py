@@ -26,6 +26,7 @@ from placegame.game.schemas import (
     BootstrapState,
     BossChallengeRequest,
     BossPreviewRequest,
+    GameUser,
 )
 
 
@@ -65,10 +66,10 @@ VALID_WORLD_BOSS = {
 
 
 VALID_RESPONSES: dict[str, dict[str, Any]] = {
-    "login": {"token": "new-session-token"},
-    "bootstrap": {"accountId": "account-1"},
-    "catalog": {"combatBalanceVersion": "balance-v1"},
-    "idle_summary": {"accumulatedSeconds": 3600, "capacitySeconds": 43200},
+    "login": {"sessionToken": "new-session-token", "expiresAt": 1787000000},
+    "bootstrap": {"player": {"id": "account-1"}},
+    "catalog": {"qualities": [], "jobs": [], "items": []},
+    "idle_summary": {"validSeconds": 3600.0},
     "view_sections": {
         "sectionEtags": {"bosses": "bosses-etag"},
         "bosses": [VALID_PERSONAL_BOSS, VALID_MAP_BOSS, VALID_WORLD_BOSS],
@@ -89,15 +90,27 @@ VALID_RESPONSES: dict[str, dict[str, Any]] = {
 }
 
 
+# Identity is reported outside `data`, so bootstrap needs an envelope-level user.
+VALID_ENVELOPE_FIELDS: dict[str, dict[str, Any]] = {
+    "bootstrap": {"user": {"id": "account-1"}},
+}
+
+
+def valid_envelope(response_key: str) -> dict[str, Any]:
+    envelope: dict[str, Any] = {"ok": True, "data": VALID_RESPONSES[response_key]}
+    envelope.update(VALID_ENVELOPE_FIELDS.get(response_key, {}))
+    return envelope
+
+
 @pytest.mark.parametrize("account_id", [" ", "x" * 129])
 def test_bootstrap_account_identity_bounds(account_id: str):
     with pytest.raises(ValidationError):
-        BootstrapState(accountId=account_id)
+        BootstrapState(user=GameUser(id=account_id))
 
 
 @pytest.mark.parametrize("account_id", ["x", "x" * 128])
 def test_bootstrap_account_identity_boundary_values(account_id: str):
-    assert BootstrapState(accountId=account_id).account_id == account_id
+    assert BootstrapState(user=GameUser(id=account_id)).account_id == account_id
 
 
 @pytest.fixture
@@ -113,7 +126,7 @@ async def game_client(settings):
 
 
 def register_success(fake_game, method: str, path: str, response_key: str) -> None:
-    fake_game.register(method, path, {"data": VALID_RESPONSES[response_key]})
+    fake_game.register(method, path, valid_envelope(response_key))
 
 
 def assert_public_error_is_contained(error: BaseException, *markers: str) -> None:
@@ -317,7 +330,7 @@ async def test_login_omits_bearer_and_fake_redacts_password(fake_game, settings)
         )
         result = await client.login("user", "login-password-marker")
 
-    assert result.token == "new-session-token"
+    assert result.session_token == "new-session-token"
     request = fake_game.requests[-1]
     assert "authorization" not in request.headers
     assert request.json_body == {"username": "user", "password": "[REDACTED]"}
@@ -374,7 +387,6 @@ async def test_fake_recursively_redacts_future_body_and_header_credentials(fake_
     [
         ("POST", "/api/auth/login", "login", lambda client: client.login("u", "p")),
         ("GET", "/api/client/bootstrap", "bootstrap", lambda client: client.bootstrap()),
-        ("GET", "/api/client/catalog", "catalog", lambda client: client.catalog()),
         ("GET", "/api/client/idle-summary", "idle_summary", lambda client: client.idle_summary()),
         (
             "POST",
@@ -440,7 +452,7 @@ async def test_fake_recursively_redacts_future_body_and_header_credentials(fake_
 async def test_missing_required_response_core_becomes_schema_mismatch(
     fake_game, game_client, method, path, response_key, call
 ):
-    fake_game.register(method, path, {"data": {}})
+    fake_game.register(method, path, {"ok": True, "data": {}})
 
     with pytest.raises(GameSchemaMismatch) as captured:
         await call(game_client)
@@ -456,13 +468,13 @@ async def test_missing_required_response_core_becomes_schema_mismatch(
             "POST",
             "/api/auth/login",
             lambda client: client.login("user", "password"),
-            {"token": 123},
+            {"sessionToken": 123},
         ),
         (
             "POST",
             "/api/auth/login",
             lambda client: client.login("user", "password"),
-            {"token": ""},
+            {"sessionToken": ""},
         ),
         (
             "POST",
@@ -853,8 +865,8 @@ async def test_login_transport_failure_contains_password_and_httpx_objects(setti
 async def test_schema_error_contains_no_raw_body_headers_or_httpx_objects(fake_game, game_client):
     fake_game.register(
         "GET",
-        "/api/client/catalog",
-        {"data": {"combatBalanceVersion": {"raw": "schema-body-marker"}}},
+        "/api/client/idle-summary",
+        {"ok": True, "data": {"validSeconds": {"raw": "schema-body-marker"}}},
         headers={
             "Location": "https://example.invalid/?token=schema-location-marker",
             "X-Api-Key": "schema-api-key-marker",
@@ -862,7 +874,7 @@ async def test_schema_error_contains_no_raw_body_headers_or_httpx_objects(fake_g
     )
 
     with pytest.raises(GameSchemaMismatch) as captured:
-        await game_client.catalog()
+        await game_client.idle_summary()
 
     assert captured.value.metadata == {"status_code": 200}
     assert_public_error_is_contained(
@@ -887,7 +899,7 @@ async def test_request_spacing_is_deterministic_and_per_client(settings):
         now += delay
 
     async def respond(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": VALID_RESPONSES["bootstrap"]})
+        return httpx.Response(200, json=valid_envelope("bootstrap"))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as first_http:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as second_http:

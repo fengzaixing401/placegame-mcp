@@ -193,6 +193,21 @@ def _safe_metadata(status_code: int, error_code: str | None = None) -> dict[str,
     return metadata
 
 
+def _payload_for(model: type[T], envelope: dict[str, object]) -> object:
+    """Pick the object a response model validates against.
+
+    Mutating endpoints answer with `data = {"result": ..., "statePatch": ...}` and
+    only the result is the operation's own payload.
+    """
+
+    if getattr(model, "reads_envelope", False):
+        return envelope
+    data = envelope["data"]
+    if isinstance(data, dict) and "result" in data and "statePatch" in data:
+        return data["result"]
+    return data
+
+
 def _interpret_response(response: httpx.Response, model: type[T]) -> T | _Failure:
     status_code = response.status_code
     error_code = _safe_error_code(response)
@@ -223,8 +238,12 @@ def _interpret_response(response: httpx.Response, model: type[T]) -> T | _Failur
             return _Failure(
                 "schema_mismatch", metadata=_safe_metadata(status_code)
             )
-        data = envelope["data"]
-        return model.model_validate(data)
+        # The game reports business failures as 200 with {"ok": false, "error": ...},
+        # so a 2xx status alone does not mean the operation succeeded. Treating it as
+        # a schema mismatch would misreport an ordinary refusal as a broken contract.
+        if envelope.get("ok") is False:
+            return _Failure("conflict", code=error_code)
+        return model.model_validate(_payload_for(model, envelope))
     except (KeyError, TypeError, ValueError, ValidationError):
         return _Failure("schema_mismatch", metadata=_safe_metadata(status_code))
 
@@ -258,7 +277,7 @@ class HttpGameClient:
         *,
         session_token: str | None = None,
         http_client: httpx.AsyncClient | None = None,
-        timeout: float = 10.0,
+        timeout: float = 15.0,
         request_spacing_seconds: float = 0.1,
         monotonic: Clock = time.monotonic,
         sleeper: Sleeper = asyncio.sleep,
@@ -287,7 +306,13 @@ class HttpGameClient:
         payload: dict[str, object] | None,
     ) -> httpx.Response | _TransportFailure:
         spec = REGISTRY[operation]
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            # Mirrors the official CLI. `omit` keeps the server from wrapping the
+            # payload in {"result": ..., "statePatch": ...}.
+            "x-placegame-client-platform": "cli",
+            "x-placegame-response-state": "omit",
+        }
         if operation != "login" and self._session_token is not None:
             headers["Authorization"] = f"Bearer {self._session_token}"
         try:

@@ -859,7 +859,7 @@ class AccountService:
             try:
                 login_api = self.game_factory(None)
                 login = await login_api.login(username, password)
-                token = login.token
+                token = login.session_token
                 api = self.game_factory(token)
                 bootstrap = await api.bootstrap()
                 return token, self.token_expiry(token), api, bootstrap.account_id

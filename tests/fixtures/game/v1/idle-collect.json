@@ -2,11 +2,16 @@
   "provenance": "synthetic",
   "endpoint": "/api/battle/idle-collect",
   "created_at": "2026-08-19T00:00:00Z",
+  "shape_verified_at": null,
+  "shape_source": null,
   "verified_at": null,
   "game_contract_version": "unverified",
   "redaction_method": "placegame.security.redaction.redact",
   "live_contract_status": "unverified",
-  "data": {
-    "collected": false
+  "response": {
+    "ok": true,
+    "data": {
+      "collected": false
+    }
   }
 }

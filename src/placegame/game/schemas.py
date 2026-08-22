@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# The live idle-summary response reports no capacity. This mirrors the ceiling the
+# game's own web client applies (480 minutes), and keeps the planner's threshold
+# bounded so it never waits past the point where idle progress stops accruing.
+IDLE_CAPACITY_SECONDS = 480 * 60
+
+
 class RequestModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
 
 class LoginRequest(RequestModel):
     username: str = Field(min_length=1)
@@ -74,24 +79,55 @@ class ResponseData(BaseModel):
         extra="allow", populate_by_name=True, strict=True
     )
 
+    # Most models validate against `data`. Set on subclasses whose fields live at
+    # envelope level instead, because identity is returned outside `data`.
+    reads_envelope: ClassVar[bool] = False
+
+
+class EnvelopeResponse(ResponseData):
+    reads_envelope: ClassVar[bool] = True
+
+
+class GameUser(ResponseData):
+    id: str = Field(min_length=1, max_length=128, pattern=r"\S")
+
 
 class LoginResult(ResponseData):
-    token: str = Field(min_length=1)
+    session_token: str = Field(alias="sessionToken", min_length=1)
+    expires_at: int | None = Field(default=None, alias="expiresAt")
 
 
-class BootstrapState(ResponseData):
-    account_id: str = Field(
-        alias="accountId", min_length=1, max_length=128, pattern=r"\S"
-    )
+class BootstrapState(EnvelopeResponse):
+    """The account identity is the envelope-level `user`, not a field in `data`."""
+
+    user: GameUser
+
+    @property
+    def account_id(self) -> str:
+        return self.user.id
 
 
 class Catalog(ResponseData):
-    combat_balance_version: str = Field(alias="combatBalanceVersion", min_length=1)
+    # The live catalog carries qualities/jobs/items. It has no version field, so
+    # there is nothing stable to require beyond a well-formed object.
+    pass
 
 
 class IdleSummary(ResponseData):
-    accumulated_seconds: int = Field(alias="accumulatedSeconds", ge=0)
-    capacity_seconds: int = Field(alias="capacitySeconds", gt=0)
+    # The live field is `validSeconds`, a float.
+    valid_seconds: float = Field(alias="validSeconds", ge=0)
+    # The live response carries no capacity. The cap is a client-side constant in
+    # the game's own web bundle (480 * 60 * 1000 ms), so it is the default here and
+    # is still honoured if the server ever starts sending it.
+    capacity_seconds: int = Field(
+        default=IDLE_CAPACITY_SECONDS, alias="capacitySeconds", gt=0
+    )
+
+    @property
+    def accumulated_seconds(self) -> int:
+        """Whole seconds, so fingerprints and audit payloads stay integral."""
+
+        return int(self.valid_seconds)
 
 
 class BossDifficultyOption(ResponseData):
