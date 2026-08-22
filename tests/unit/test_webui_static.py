@@ -38,6 +38,11 @@ async def test_root_and_assets_are_public_webui_resources(settings):
     assert "disable_drain_remove" not in script.text
     assert 'editSecret.type = "password"' in script.text
     assert 'edit-dialog' in root.text
+    assert 'password-dialog' in root.text
+    assert "修改管理员密码" in root.text
+    assert "/auth/password" in script.text
+    assert "password_too_short" in script.text
+    assert "setup_already_complete" in script.text
     assert 'window.prompt("New game password' not in script.text
     assert 'window.prompt("New session token' not in script.text
 

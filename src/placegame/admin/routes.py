@@ -71,6 +71,13 @@ class PasswordRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
+class PasswordChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
+
+    current_password: str = Field(alias="currentPassword", min_length=1)
+    new_password: str = Field(alias="newPassword", min_length=1)
+
+
 class CredentialsCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -293,6 +300,32 @@ def create_admin_router(*, cookie_secure: bool = True) -> APIRouter:
         )
         if isinstance(result, JSONResponse):
             return result
+        clear_session_cookie(response)
+        response.status_code = 204
+        return response
+
+    @router.patch("/auth/password", status_code=204, response_model=None)
+    async def auth_change_password(
+        request: Request,
+        response: Response,
+        body: PasswordChangeRequest,
+        session: AdminSession | JSONResponse | None = Depends(require_admin),
+    ) -> Response | JSONResponse:
+        guard = write_guard(request)
+        if guard is not None:
+            return guard
+        if isinstance(session, JSONResponse):
+            return session
+        if session is None:
+            return unauthorized()
+        result = await invoke(
+            lambda: auth(request).change_password(
+                body.current_password, body.new_password
+            )
+        )
+        if isinstance(result, JSONResponse):
+            return result
+        # change_password drops every session, so this browser must sign in again.
         clear_session_cookie(response)
         response.status_code = 204
         return response

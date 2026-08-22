@@ -52,6 +52,10 @@ docker compose --env-file .env.docker up -d --build
 `migrate` 服务会先跑完 Alembic 迁移，`app` 才会启动。就绪后访问
 <http://127.0.0.1:18080>，首次打开会要求设置管理员密码。
 
+管理员密码只在首次运行时设置一次，之后可以在控制台右上角的「修改密码」里更改
+（需要输入当前密码）。程序不强制最小长度，只要求非空——它保护的是加密存储的游戏账号
+凭据，请自行设置足够强的密码。修改密码会使所有已登录会话立即失效，包括当前这个。
+
 ```bash
 docker compose --env-file .env.docker logs -f app   # 查看日志
 docker compose --env-file .env.docker down          # 停止（保留数据卷）

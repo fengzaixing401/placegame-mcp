@@ -14,7 +14,10 @@
           <p class="eyebrow">PLACEGAME</p>
           <h1>运维控制台</h1>
         </div>
-        <button id="logout" class="quiet hidden" type="button">退出登录</button>
+        <div class="topbar-actions">
+          <button id="change-password" class="quiet hidden" type="button">修改密码</button>
+          <button id="logout" class="quiet hidden" type="button">退出登录</button>
+        </div>
       </header>
 
       <section id="notice" class="notice" role="status" aria-live="polite"></section>
@@ -92,6 +95,25 @@
         <div class="dialog-actions">
           <button id="edit-cancel" type="submit" value="cancel">取消</button>
           <button id="edit-submit" class="primary" type="submit" value="save">保存</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="password-dialog" aria-labelledby="password-dialog-title">
+      <form id="password-form">
+        <p class="eyebrow">账号安全</p>
+        <h2 id="password-dialog-title">修改管理员密码</h2>
+        <div class="field">
+          <label for="current-password">当前密码</label>
+          <input id="current-password" name="currentPassword" type="password" autocomplete="current-password" required />
+        </div>
+        <div class="field">
+          <label for="new-password">新密码</label>
+          <input id="new-password" name="newPassword" type="password" autocomplete="new-password" required />
+        </div>
+        <p class="muted">修改后所有已登录的会话都会失效，包括当前这个，需要重新登录。</p>
+        <div class="dialog-actions">
+          <button id="password-cancel" type="submit" value="cancel">取消</button>
+          <button id="password-submit" class="primary" type="submit" value="save">保存</button>
         </div>
       </form>
     </dialog>

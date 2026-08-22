@@ -9,7 +9,7 @@ from typing import Protocol
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,7 +18,6 @@ from placegame.security.tokens import token_digest
 
 
 SESSION_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}\Z", re.ASCII)
-PASSWORD_MIN_LENGTH = 14
 DEFAULT_IDLE_SECONDS = 30 * 60
 DEFAULT_ABSOLUTE_SECONDS = 12 * 60 * 60
 
@@ -69,6 +68,8 @@ class AdminAuthStore(Protocol):
 
     async def read_password_hash(self) -> str | None: ...
 
+    async def update_password_hash(self, password_hash: str, now: datetime) -> None: ...
+
     async def create_session(
         self, token_digest: str, now: datetime, absolute_expires_at: datetime
     ) -> AdminSession: ...
@@ -78,6 +79,8 @@ class AdminAuthStore(Protocol):
     ) -> AdminSession | None: ...
 
     async def delete_session(self, token_digest: str) -> None: ...
+
+    async def delete_all_sessions(self) -> None: ...
 
 
 class PostgresAdminAuthStore:
@@ -109,6 +112,19 @@ class PostgresAdminAuthStore:
             return await session.scalar(
                 select(AdminCredential.password_hash).where(AdminCredential.id == 1)
             )
+
+    async def update_password_hash(self, password_hash: str, now: datetime) -> None:
+        async with self.sessions.begin() as session:
+            record = await session.scalar(
+                select(AdminCredential)
+                .where(AdminCredential.id == 1)
+                .with_for_update()
+            )
+            if record is None:
+                raise Unauthorized()
+            record.password_hash = password_hash
+            record.updated_at = now
+            await session.flush()
 
     async def create_session(
         self, token_digest: str, now: datetime, absolute_expires_at: datetime
@@ -152,6 +168,10 @@ class PostgresAdminAuthStore:
             )
             if record is not None:
                 await session.delete(record)
+
+    async def delete_all_sessions(self) -> None:
+        async with self.sessions.begin() as session:
+            await session.execute(delete(AdminSession))
 
 
 class AdminAuthService:
@@ -199,6 +219,23 @@ class AdminAuthService:
         )
         return LoginSession(token=token, session=record)
 
+    async def change_password(self, current_password: str, new_password: str) -> None:
+        password_hash = await self.store.read_password_hash()
+        if password_hash is None or not isinstance(current_password, str):
+            raise Unauthorized()
+        try:
+            self.hasher.verify(password_hash, current_password)
+        except (InvalidHashError, VerificationError, VerifyMismatchError):
+            raise Unauthorized() from None
+        # Checked only after the current password is proven, so a caller who does not
+        # know it cannot tell a rejected new password from a rejected old one.
+        self._require_password(new_password)
+        await self.store.update_password_hash(
+            self.hasher.hash(new_password), self._now()
+        )
+        # Every session is dropped so a stolen cookie cannot outlive the change.
+        await self.store.delete_all_sessions()
+
     async def validate(self, raw_token: str | None) -> AdminSession | None:
         if not isinstance(raw_token, str) or SESSION_TOKEN_PATTERN.fullmatch(raw_token) is None:
             return None
@@ -219,11 +256,7 @@ class AdminAuthService:
 
     @staticmethod
     def _require_password(password: str) -> None:
-        if (
-            not isinstance(password, str)
-            or len(password) < PASSWORD_MIN_LENGTH
-            or not password.strip()
-        ):
+        if not isinstance(password, str) or not password.strip():
             raise PasswordTooShort()
 
 

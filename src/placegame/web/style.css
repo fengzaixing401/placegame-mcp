@@ -47,7 +47,7 @@ button.danger { color: var(--danger); }
 .account { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
 .account h3 { margin: 0 0 6px; font-size: 16px; }
 .account-meta { color: var(--muted); font-size: 13px; }
-.account-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.account-actions, .topbar-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .empty { padding: 28px 0; color: var(--muted); }
 .hidden { display: none !important; }
 @media (max-width: 600px) {

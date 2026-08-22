@@ -19,6 +19,9 @@ class MemoryStore:
     async def read_password_hash(self) -> str | None:
         return self.password_hash
 
+    async def update_password_hash(self, password_hash: str, now: datetime) -> None:
+        self.password_hash = password_hash
+
     async def create_session(
         self, token_digest: str, now: datetime, absolute_expires_at: datetime
     ) -> AdminSession:
@@ -46,6 +49,9 @@ class MemoryStore:
     async def delete_session(self, token_digest: str) -> None:
         self.sessions.pop(token_digest, None)
 
+    async def delete_all_sessions(self) -> None:
+        self.sessions.clear()
+
 
 @pytest.fixture
 def clock():
@@ -65,16 +71,57 @@ def auth(clock):
     return AdminAuthService(MemoryStore(), clock=clock)
 
 
-async def test_setup_is_one_time_and_requires_fourteen_characters(auth):
+async def test_setup_is_one_time_and_only_rejects_a_blank_password(auth):
     from placegame.admin.auth import PasswordTooShort, SetupAlreadyComplete
 
     with pytest.raises(PasswordTooShort, match="password_too_short"):
-        await auth.setup("a" * 13)
+        await auth.setup("   ")
 
-    await auth.setup("a" * 14)
+    # No minimum length is enforced; a short password is accepted.
+    await auth.setup("short")
 
     with pytest.raises(SetupAlreadyComplete, match="setup_already_complete"):
         await auth.setup("another-password")
+
+
+async def test_change_password_requires_the_current_password(auth):
+    from placegame.admin.auth import Unauthorized
+
+    await auth.setup("first-password")
+
+    with pytest.raises(Unauthorized, match="^unauthorized$"):
+        await auth.change_password("wrong-password", "second-password")
+
+    assert await auth.login("first-password") is not None
+
+
+async def test_change_password_replaces_the_hash_and_drops_every_session(auth):
+    from placegame.admin.auth import Unauthorized
+
+    await auth.setup("first-password")
+    await auth.login("first-password")
+    await auth.login("first-password")
+    assert len(auth.store.sessions) == 2
+
+    await auth.change_password("first-password", "x")
+
+    assert auth.store.sessions == {}
+    with pytest.raises(Unauthorized, match="^unauthorized$"):
+        await auth.login("first-password")
+    assert await auth.login("x") is not None
+
+
+async def test_a_blank_new_password_leaves_the_credential_and_sessions_intact(auth):
+    from placegame.admin.auth import PasswordTooShort
+
+    await auth.setup("first-password")
+    logged_in = await auth.login("first-password")
+
+    with pytest.raises(PasswordTooShort, match="password_too_short"):
+        await auth.change_password("first-password", "   ")
+
+    assert await auth.validate(logged_in.token) is not None
+    assert await auth.login("first-password") is not None
 
 
 async def test_failed_login_is_always_generic(auth):
