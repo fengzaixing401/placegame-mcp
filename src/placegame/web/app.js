@@ -34,6 +34,7 @@
     account_not_found: "账号不存在。",
     game_unavailable: "游戏服务暂时不可用。",
     game_contract_changed: "游戏接口返回的结构与本服务的预期不符，重试无效，需要先更新接口契约。",
+    game_client_version_rejected: "游戏要求更新客户端版本。本服务已记录游戏指定的新版本，请重试一次；若仍失败请升级本服务。",
     account_auth_mode_conflict: "请使用与该账号当前认证方式匹配的编辑入口。",
     account_identity_conflict: "该游戏账号已在此处管理。",
     authentication_required: "游戏凭据被拒绝。",

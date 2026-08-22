@@ -5,12 +5,6 @@ from typing import ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-# The live idle-summary response reports no capacity. This mirrors the ceiling the
-# game's own web client applies (480 minutes), and keeps the planner's threshold
-# bounded so it never waits past the point where idle progress stops accruing.
-IDLE_CAPACITY_SECONDS = 480 * 60
-
-
 class RequestModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -114,13 +108,14 @@ class Catalog(ResponseData):
 
 
 class IdleSummary(ResponseData):
-    # The live field is `validSeconds`, a float.
+    # The live field is `validSeconds`, a float. The name is the server's own: it
+    # reports seconds that already count as collectible.
     valid_seconds: float = Field(alias="validSeconds", ge=0)
-    # The live response carries no capacity. The cap is a client-side constant in
-    # the game's own web bundle (480 * 60 * 1000 ms), so it is the default here and
-    # is still honoured if the server ever starts sending it.
-    capacity_seconds: int = Field(
-        default=IDLE_CAPACITY_SECONDS, alias="capacitySeconds", gt=0
+    # The live response carries no capacity, and a live account was observed at
+    # 37760 valid seconds — past any 8-hour ceiling — so there is no client-side
+    # cap to assume. Stays None unless the server starts sending one.
+    capacity_seconds: int | None = Field(
+        default=None, alias="capacitySeconds", gt=0
     )
 
     @property

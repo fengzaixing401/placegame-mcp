@@ -65,6 +65,12 @@ class ContractChanged(GameError):
     pass
 
 
+class ClientVersionRejected(GameError):
+    """The game refused the declared client version and named the one it wants."""
+
+    pass
+
+
 class InventoryFull(GameError):
     pass
 

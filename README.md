@@ -84,6 +84,7 @@ docker compose --env-file .env.docker down -v       # 停止并删除数据库�
 | `PLACEGAME_MCP_ALLOWED_HOSTS` | `["127.0.0.1:*","localhost:*","[::1]:*"]` | MCP 端点允许的 Host，防 DNS rebinding |
 | `PLACEGAME_ADMIN_COOKIE_SECURE` | `true` | 管理会话 cookie 是否仅限 HTTPS；通过 HTTP 访问时须设为 `false` |
 | `GAME_BASE_URL` | `https://game.placegame.cn` | 正式模式下不可改为其它地址 |
+| `GAME_CLIENT_VERSION` | `0.2.48` | 向游戏声明的客户端版本。游戏对每个接口都校验它，版本过低会返回 426 并在响应里给出要求的版本，本服务会自动采纳并重试一次，因此这个值过期会自愈，无需手动维护 |
 | `TEST_MODE` | `false` | 置 `true` 时 `GAME_BASE_URL` 必须指向回环地址 |
 | `SCHEDULER_LEASE_SECONDS` | `30` | 调度租约时长 |
 | `MAX_ACCOUNT_CONCURRENCY` | `4` | 跨账号的最大并发数 |
