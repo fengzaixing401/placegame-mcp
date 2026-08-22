@@ -357,9 +357,9 @@
       });
       createForm.reset();
       updateCreateMode();
-      showNotice("账号已创建。");
+      showNotice("账号已添加。");
     } catch (error) {
-      showNotice(messages[error.message] || "无法创建账号。");
+      showNotice(messages[error.message] || "无法添加账号。");
     } finally {
       clearSecretFields(createForm);
       setPending(button, false);
