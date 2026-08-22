@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from placegame.errors import (
     AmbiguousMutation,
+    ClientVersionRejected,
     ContractChanged,
     GameConflict,
     GameError,
@@ -20,7 +21,7 @@ from placegame.errors import (
     InventoryFull,
     SessionRejected,
 )
-from placegame.game.client import HttpGameClient
+from placegame.game.client import GameClientVersion, HttpGameClient
 from placegame.game.registry import EndpointSpec, REGISTRY
 from placegame.game.schemas import (
     BootstrapState,
@@ -723,7 +724,7 @@ async def test_login_and_mutation_timeout_once_and_are_ambiguous(
     [
         (401, {"error": {"code": "session_rejected"}}, SessionRejected),
         (403, {"error": {"code": "session_rejected"}}, SessionRejected),
-        (426, {"error": {"code": "upgrade_required"}}, ContractChanged),
+        (426, {"error": {"code": "upgrade_required"}}, ClientVersionRejected),
         (400, {"error": {"code": "inventory_full"}}, InventoryFull),
         (400, {"error": {"code": "insufficient_resource"}}, InsufficientResource),
         (409, {"error": {"code": "conflict"}}, GameConflict),
@@ -922,6 +923,87 @@ async def test_request_spacing_is_deterministic_and_per_client(settings):
             await second.bootstrap()
 
     assert delays == [0.5]
+
+
+async def test_every_request_declares_the_client_version_and_platform(
+    fake_game, game_client
+):
+    register_success(fake_game, "GET", "/api/client/bootstrap", "bootstrap")
+
+    await game_client.bootstrap()
+
+    request = fake_game.requests[-1]
+    assert request.headers["x-placegame-client-version"] == "0.2.48"
+    assert request.headers["x-placegame-client-platform"] == "cli"
+    assert request.headers["x-placegame-response-state"] == "omit"
+
+
+async def test_a_426_adopts_the_demanded_version_and_retries_once(fake_game, settings):
+    """The game names the version it wants, so a stale seed self-corrects."""
+
+    rejected = {
+        "ok": False,
+        "error": "当前客户端版本过低。",
+        "data": {"minimumClientVersion": "9.9.9"},
+    }
+    sent: list[str] = []
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request.headers["x-placegame-client-version"])
+        if len(sent) == 1:
+            return httpx.Response(426, json=rejected)
+        return httpx.Response(200, json=valid_envelope("bootstrap"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = HttpGameClient(settings, http_client=http, request_spacing_seconds=0)
+        result = await client.bootstrap()
+
+    assert result.account_id == "account-1"
+    assert sent == ["0.2.48", "9.9.9"]
+
+
+async def test_a_426_is_reported_as_a_version_problem_not_a_contract_one(
+    fake_game, game_client
+):
+    fake_game.register(
+        "GET",
+        "/api/client/bootstrap",
+        {"ok": False, "error": "版本过低。", "data": {"minimumClientVersion": "0.2.48"}},
+        status_code=426,
+    )
+
+    with pytest.raises(ClientVersionRejected):
+        await game_client.bootstrap()
+
+    # The seed already matches, so there is nothing new to adopt and no retry.
+    assert len(fake_game.requests) == 1
+
+
+async def test_a_426_without_a_usable_version_is_not_retried(fake_game, game_client):
+    fake_game.register(
+        "GET",
+        "/api/client/bootstrap",
+        {"ok": False, "data": {"minimumClientVersion": "not-a-version"}},
+        status_code=426,
+    )
+
+    with pytest.raises(ClientVersionRejected):
+        await game_client.bootstrap()
+
+    assert len(fake_game.requests) == 1
+
+
+@pytest.mark.parametrize("candidate", ["not-a-version", "", "1.2", "0.2.48-" + "x" * 40])
+def test_the_version_holder_refuses_an_implausible_version(candidate: str):
+    holder = GameClientVersion("0.2.48")
+
+    assert holder.adopt(candidate) is False
+    assert holder.value == "0.2.48"
+
+
+def test_the_version_holder_rejects_an_implausible_seed():
+    with pytest.raises(ValueError):
+        GameClientVersion("not-a-version")
 
 
 async def _noop() -> None:

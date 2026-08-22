@@ -15,7 +15,7 @@ from .application.idle import IdleExecutionClaims, IdleExecutionGuard, IdleExecu
 from .application.status import AccountStatusQuery
 from .config import Settings
 from .db import Database
-from .game.client import HttpGameClient
+from .game.client import GameClientVersion, HttpGameClient
 from .mcp.adapter import create_mcp_server
 from .mcp.auth import StaticBearerAuthMiddleware
 from .policy.store import PostgresPolicyService
@@ -35,9 +35,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         PostgresAdminAuthStore(app.state.session_factory)
     )
     repository = AccountRepository()
+    # One holder for the whole process: a version the game teaches us through a 426
+    # must apply to every account, not just the request that discovered it.
+    app.state.game_client_version = GameClientVersion(
+        app.state.settings.game_client_version
+    )
 
     def game_factory(session_token: str | None) -> HttpGameClient:
-        return HttpGameClient(app.state.settings, session_token=session_token, http_client=app.state.http_client)
+        return HttpGameClient(
+            app.state.settings,
+            session_token=session_token,
+            http_client=app.state.http_client,
+            client_version=app.state.game_client_version,
+        )
 
     policy = PostgresPolicyService(app.state.database.sessions, lambda _account_id: 0, repository)
     accounts = AccountService(

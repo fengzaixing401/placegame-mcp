@@ -39,6 +39,9 @@ class Settings(BaseSettings):
         alias="PLACEGAME_MCP_ALLOWED_HOSTS",
     )
     admin_cookie_secure: bool = Field(True, alias="PLACEGAME_ADMIN_COOKIE_SECURE")
+    # The game gates every endpoint on this and answers 426 with the version it
+    # wants, which the client then adopts, so a stale seed self-corrects.
+    game_client_version: str = "0.2.48"
     scheduler_interval_seconds: int = 300
     scheduler_lease_seconds: int = 30
     scheduler_worker_id: str = _DEFAULT_SCHEDULER_WORKER_ID
